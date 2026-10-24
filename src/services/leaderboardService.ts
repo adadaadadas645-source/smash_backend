@@ -54,7 +54,7 @@ export function allowedLevel(prevLevel: number | null, prevAtMs: number | null, 
 type Top = { rows: Array<BoardRowOut & { playerId: string }>; at: string };
 const topCache = new TtlCache<Top>(config.leaderboard.cacheMs, 4);
 const rankCache = new TtlCache<{ rank: number; level: number } | null>(config.leaderboard.cacheMs, 50_000);
-const totalCache = new TtlCache<number>(5 * 60_000, 2);
+const totalCache = new TtlCache<number>(60_000, 2);
 
 export interface SubmitResult {
   level: number;

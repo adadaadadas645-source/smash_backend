@@ -57,7 +57,8 @@ export function createLeaderboardRouter(): Router {
         success: true,
         top: rows,
         me: inList ? { rank: inList.rank, level: inList.level } : me,
-        total,
+        // The count is up to a minute old: never fewer than the board itself shows.
+        total: Math.max(total, rows.length, inList?.rank ?? me?.rank ?? 0),
         updatedAt: top.at,
       });
     }),
