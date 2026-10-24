@@ -31,7 +31,7 @@ export function createAuthRouter(): Router {
       const playerId = newPlayerId();
       setContextPlayer(playerId);
       const doc = await playerService.create(playerId, hashDeviceSecret(body.deviceSecret), {
-        name: body.name ?? `Oyuncu${1000 + Math.floor(Math.random() * 9000)}`,
+        name: body.name ?? `Player${1000 + Math.floor(Math.random() * 9000)}`,
         avatar: body.avatar ?? 'leo',
         frame: body.frame ?? 'gold',
         locale: body.locale,

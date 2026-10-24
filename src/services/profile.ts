@@ -7,7 +7,7 @@ export const FRAMES = ['gold', 'purple', 'blue'] as const;
 /**
  * A name as the leaderboard shows it: control characters, zero-width and bidi marks and markup
  * out, spaces collapsed, at most 16 characters (the game's own limit). Empty after that:
- * a generated "Oyuncu1234"-style name.
+ * a generated "Player1234"-style name.
  */
 export function cleanName(raw: unknown): string {
   let s = typeof raw === 'string' ? raw : '';
@@ -15,7 +15,7 @@ export function cleanName(raw: unknown): string {
   s = s.replace(/[\u0000-\u001F\u007F-\u009F​-‏‪-‮⁠-⁯﻿<>]/g, '');
   s = s.replace(/\s+/g, ' ').trim();
   if ([...s].length > 16) s = [...s].slice(0, 16).join('').trim();
-  if (s.length === 0) s = `Oyuncu${1000 + Math.floor(Math.random() * 9000)}`;
+  if (s.length === 0) s = `Player${1000 + Math.floor(Math.random() * 9000)}`;
   return s;
 }
 

@@ -7,6 +7,7 @@ process.env.LOG_REQUESTS_TO_DB = 'false';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { test } from 'node:test';
+import { findProduct } from '../src/services/catalog';
 import { allowedLevel } from '../src/services/leaderboardService';
 import { cleanName } from '../src/services/profile';
 import { parseUnityReceipt, signatureValid } from '../src/services/receipt';
@@ -34,8 +35,14 @@ test('allowedLevel: rises as fast as levels can be played, no faster', () => {
 test('cleanName: strips control and bidi marks, keeps 16 characters', () => {
   assert.equal(cleanName('  Ali‮  Veli\u0000 '), 'Ali Veli');
   assert.equal([...cleanName('ÇokUzunBirİsimBuradaVar')].length, 16);
-  assert.match(cleanName('   '), /^Oyuncu\d{4}$/);
+  assert.match(cleanName('   '), /^Player\d{4}$/);
   assert.equal(cleanName('<b>x</b>'), 'bx/b');
+});
+
+test('catalog: the two offers of the "Continue?" popup, as the game gives them', () => {
+  assert.deepEqual(findProduct('offer_royal_deal'), { id: 'offer_royal_deal', once: false, coins: 0, heartsMin: 60, noAdsMin: 0, giant: 2, bombs: 2 });
+  assert.deepEqual(findProduct('offer_special'), { id: 'offer_special', once: false, coins: 1000, heartsMin: 0, noAdsMin: 0, giant: 1, bombs: 0 });
+  assert.equal(findProduct('offer_unknown'), null);
 });
 
 test('tokens: issue and verify; a wrong secret fails', () => {

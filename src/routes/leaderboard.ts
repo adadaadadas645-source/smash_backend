@@ -27,7 +27,7 @@ export function createLeaderboardRouter(): Router {
       let { name, avatar, frame } = body;
       if (name === undefined || avatar === undefined || frame === undefined) {
         const p = await playerService.get(req.playerId);
-        name ??= p?.name ?? 'Oyuncu';
+        name ??= p?.name ?? 'Player';
         avatar ??= (p?.avatar as typeof avatar) ?? 'leo';
         frame ??= (p?.frame as typeof frame) ?? 'gold';
       }

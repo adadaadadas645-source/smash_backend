@@ -34,6 +34,9 @@ export const PRODUCTS: Record<string, Product> = Object.fromEntries(
     p('pack_fortress', 60000, 12 * H, 7 * D, 12, 6),
     p('pack_legend', 70000, 24 * H, -1, 15, 10),
     p('offer_welcome', 1000, 2 * H, H, 2, 2),
+    // The two offers under "Continue?" in a level (each also adds +5 balls there, in the game only).
+    p('offer_royal_deal', 0, H, 0, 2, 2),
+    p('offer_special', 1000, 0, 0, 1, 0),
     p('remove_ads', 0, 0, -1, 0, 0, true),
   ].map((x) => [x.id, x]),
 );
