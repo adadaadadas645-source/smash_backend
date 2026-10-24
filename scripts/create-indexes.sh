@@ -27,4 +27,4 @@ gcloud firestore fields ttls update expireAt --collection-group=kingdom_logs --e
 
 echo
 echo "Building takes a few minutes. Check with:"
-echo "  gcloud firestore indexes composite list --project=$P --filter='collectionGroup~kingdom_'"
+echo "  gcloud firestore indexes composite list --project=$P --format='table(name.segment(-3):label=COLLECTION,fields.fieldPath.list():label=FIELDS,state)' | grep -E 'COLLECTION|kingdom_'"
