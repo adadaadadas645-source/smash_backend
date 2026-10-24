@@ -33,6 +33,10 @@ export function createApp(): express.Express {
   app.use(requestLogger);
   app.use(limits.global);
 
+  // Render's own probe when no health check path is set: answered without a log line.
+  app.all('/', (_req, res) => {
+    res.status(200).json({ ok: true, service: 'kingdom-backend' });
+  });
   app.get('/health', (_req, res) => {
     res.json({ ok: true, version: config.version, uptimeS: Math.round(process.uptime()), startedAt: started.toISOString() });
   });

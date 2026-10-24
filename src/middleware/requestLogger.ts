@@ -10,7 +10,7 @@ import { safeForLog } from '../utils/safeLog';
  * out (status, time, and the answer's body), as Avenia's routeLogger does, plus the same pair as
  * one row in kingdom_logs. A request that the client gave up on is logged as aborted.
  */
-const SKIP = new Set(['/health', '/favicon.ico']);
+const SKIP = new Set(['/', '/health', '/favicon.ico']);
 const SLOW_MS = 1500;
 
 export function requestLogger(req: Request, res: Response, next: NextFunction): void {
