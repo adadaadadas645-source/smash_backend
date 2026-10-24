@@ -1,0 +1,43 @@
+# Render Blueprint: Dashboard > New > Blueprint, bu repoyu seç.
+# Gizli değerler (sync: false) panelden elle girilir; repoya hiçbir gizli değer girmez.
+services:
+  - type: web
+    name: kingdom-backend
+    runtime: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "20"
+      - key: LOG_LEVEL
+        value: info
+      - key: FIREBASE_PROJECT_ID
+        value: aveniaapp
+      - key: COLLECTION_PREFIX
+        value: kingdom_
+      - key: ANDROID_PACKAGE_NAME
+        value: com.puzzle.blockescape
+      - key: ALLOW_TEST_PURCHASES
+        value: "true"
+      - key: LOG_REQUESTS_TO_DB
+        value: "true"
+      - key: LOG_RETENTION_DAYS
+        value: "30"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEVICE_SECRET_PEPPER
+        generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: FIREBASE_SERVICE_ACCOUNT_KEY
+        sync: false
+      - key: GOOGLE_PLAY_LICENSE_KEY
+        sync: false
+      - key: GOOGLE_PLAY_SERVICE_ACCOUNT_KEY
+        sync: false

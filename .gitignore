@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-test/
+.env
+.env.*
+!.env.example
+*.log
+service-account*.json
+.DS_Store

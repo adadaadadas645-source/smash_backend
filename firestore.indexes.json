@@ -1,0 +1,75 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "kingdom_leaderboard",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "level", "order": "DESCENDING" },
+        { "fieldPath": "levelReachedAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_leaderboard",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "level", "order": "ASCENDING" },
+        { "fieldPath": "levelReachedAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "playerId", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "requestId", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "kind", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "name", "order": "ASCENDING" },
+        { "fieldPath": "at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "kingdom_logs",
+      "fieldPath": "data",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "kingdom_logs",
+      "fieldPath": "expireAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "kingdom_purchases",
+      "fieldPath": "google",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "kingdom_purchases",
+      "fieldPath": "grant",
+      "indexes": []
+    }
+  ]
+}
