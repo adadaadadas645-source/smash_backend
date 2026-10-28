@@ -46,7 +46,9 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     const level = err.status >= 500 ? 'error' : 'warn';
     logger[level]({ error: err.code, status: err.status, details: err.details }, err.message);
     if (err.status >= 500) dbLog.error(err.code, err, err.details);
-    res.status(err.status).json({ success: false, error: err.code, message: err.message, requestId });
+    // A client error's details are the game's to read (a stale save's rev, when a lock ends).
+    const details = err.status < 500 && err.details ? { details: err.details } : {};
+    res.status(err.status).json({ success: false, error: err.code, message: err.message, ...details, requestId });
     return;
   }
   // express.json() on a malformed body.

@@ -11,6 +11,7 @@ import { createAdminRouter } from './routes/admin';
 import { createAuthRouter } from './routes/auth';
 import { createClientLogRouter } from './routes/clientLogs';
 import { createLeaderboardRouter } from './routes/leaderboard';
+import { createReferralRouter } from './routes/referrals';
 import { createPlayerRouter } from './routes/players';
 import { createPurchaseRouter } from './routes/purchases';
 import { googlePlayConfigured } from './services/googlePlay';
@@ -59,6 +60,7 @@ export function createApp(): express.Express {
   mount(`${API}/leaderboard`, createLeaderboardRouter(), 'leaderboard');
   mount(`${API}/purchases`, createPurchaseRouter(), 'purchases');
   mount(`${API}/logs`, createClientLogRouter(), 'clientLogs');
+  mount(`${API}/referrals`, createReferralRouter(), 'referrals');
   mount(`${API}/admin`, createAdminRouter(), 'admin');
 
   app.use(notFound);

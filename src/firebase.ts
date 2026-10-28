@@ -43,6 +43,10 @@ export const col = {
   leaderboard: () => db.collection(config.collections.leaderboard),
   purchases: () => db.collection(config.collections.purchases),
   logs: () => db.collection(config.collections.logs),
+  usernames: () => db.collection(config.collections.usernames),
+  saves: () => db.collection(config.collections.saves),
+  invites: () => db.collection(config.collections.invites),
+  referrals: () => db.collection(config.collections.referrals),
 };
 
 /** A cheap read that proves the credentials and the database work (used by /health/deep). */

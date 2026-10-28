@@ -19,6 +19,18 @@ export interface PlayerDoc {
   banReason?: string | null;
   noAdsForever: boolean;
   purchaseCount: number;
+  /** What the verified purchases handed over, in all (for the save's coin check). */
+  purchasedCoins?: number;
+  purchasedGiant?: number;
+  purchasedBombs?: number;
+  /** The account (AccountService): a username taken once for good, and the password's hash. */
+  username?: string | null;
+  usernameKey?: string | null;
+  passwordHash?: string | null;
+  /** Raised each time the account moves to another device; tokens of an older one stop working. */
+  gen?: number;
+  failedLogins?: number;
+  lockedUntil?: FirebaseFirestore.Timestamp | null;
   createdAt: FirebaseFirestore.Timestamp;
   lastSeenAt: FirebaseFirestore.Timestamp;
   lastIp?: string | null;
@@ -32,6 +44,7 @@ export interface PlayerDoc {
 export interface PlayerStatus {
   exists: boolean;
   banned: boolean;
+  gen: number;
 }
 
 const statusCache = new TtlCache<PlayerStatus>(60_000, 50_000);
@@ -64,7 +77,7 @@ export const playerService = {
       locale: profile.locale ?? null,
     };
     await col.players().doc(playerId).create(doc);
-    statusCache.set(playerId, { exists: true, banned: false });
+    statusCache.set(playerId, { exists: true, banned: false, gen: 0 });
     seenCache.set(playerId, true);
     return doc;
   },
@@ -73,7 +86,7 @@ export const playerService = {
     const snap = await col.players().doc(playerId).get();
     if (!snap.exists) return null;
     const doc = snap.data() as PlayerDoc;
-    statusCache.set(playerId, { exists: true, banned: !!doc.banned });
+    statusCache.set(playerId, { exists: true, banned: !!doc.banned, gen: doc.gen ?? 0 });
     return doc;
   },
 
@@ -81,8 +94,8 @@ export const playerService = {
   async status(playerId: string): Promise<PlayerStatus> {
     return statusCache.getOrLoad(playerId, async () => {
       const snap = await col.players().doc(playerId).get();
-      if (!snap.exists) return { exists: false, banned: false };
-      return { exists: true, banned: !!(snap.get('banned') as boolean | undefined) };
+      if (!snap.exists) return { exists: false, banned: false, gen: 0 };
+      return { exists: true, banned: !!(snap.get('banned') as boolean | undefined), gen: (snap.get('gen') as number | undefined) ?? 0 };
     });
   },
 
@@ -111,7 +124,11 @@ export const playerService = {
 
   async updateProfile(playerId: string, profile: { name?: string; avatar?: string; frame?: string; locale?: string }): Promise<void> {
     const update: Record<string, unknown> = {};
-    if (profile.name !== undefined) update.name = profile.name;
+    // The name is the username once the account is made: it never changes after that.
+    if (profile.name !== undefined) {
+      const snap = await col.players().doc(playerId).get();
+      if (!snap.get('username')) update.name = profile.name;
+    }
     if (profile.avatar !== undefined) update.avatar = profile.avatar;
     if (profile.frame !== undefined) update.frame = profile.frame;
     if (profile.locale !== undefined) update.locale = profile.locale;
@@ -122,7 +139,7 @@ export const playerService = {
 
   async setBanned(playerId: string, banned: boolean, reason: string | null): Promise<void> {
     await col.players().doc(playerId).update({ banned, banReason: reason, bannedAt: banned ? FieldValue.serverTimestamp() : null });
-    statusCache.set(playerId, { exists: true, banned });
+    statusCache.delete(playerId);
   },
 };
 
@@ -135,6 +152,8 @@ export function publicPlayer(doc: PlayerDoc) {
     frame: doc.frame,
     level: doc.level,
     noAdsForever: !!doc.noAdsForever,
+    username: doc.username ?? null,
+    hasAccount: !!doc.username,
     purchaseCount: doc.purchaseCount ?? 0,
     createdAt: doc.createdAt?.toDate?.().toISOString?.() ?? null,
   };

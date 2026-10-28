@@ -11,6 +11,8 @@ import { config } from '../config';
 export interface AccessClaims {
   sub: string;
   typ: 'player';
+  /** The player's session generation: an account moved to another device (POST /auth/recover) raises it, and older tokens stop working. */
+  gen?: number;
 }
 
 export function newPlayerId(): string {
@@ -28,9 +30,9 @@ export function deviceSecretMatches(secret: string, storedHash: string): boolean
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function issueAccessToken(playerId: string): { token: string; expiresAt: string } {
+export function issueAccessToken(playerId: string, gen = 0): { token: string; expiresAt: string } {
   const ttlSeconds = config.jwt.ttlDays * 86400;
-  const token = jwt.sign({ typ: 'player' } satisfies Omit<AccessClaims, 'sub'>, config.jwt.secret, {
+  const token = jwt.sign({ typ: 'player', gen } satisfies Omit<AccessClaims, 'sub'>, config.jwt.secret, {
     algorithm: 'HS256',
     subject: playerId,
     issuer: config.jwt.issuer,
@@ -41,7 +43,7 @@ export function issueAccessToken(playerId: string): { token: string; expiresAt: 
   return { token, expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString() };
 }
 
-export type VerifyResult = { ok: true; playerId: string } | { ok: false; reason: 'expired' | 'invalid' };
+export type VerifyResult = { ok: true; playerId: string; gen: number } | { ok: false; reason: 'expired' | 'invalid' };
 
 export function verifyAccessToken(token: string): VerifyResult {
   try {
@@ -51,7 +53,7 @@ export function verifyAccessToken(token: string): VerifyResult {
       audience: config.jwt.audience,
     }) as jwt.JwtPayload;
     if (decoded.typ !== 'player' || typeof decoded.sub !== 'string') return { ok: false, reason: 'invalid' };
-    return { ok: true, playerId: decoded.sub };
+    return { ok: true, playerId: decoded.sub, gen: typeof decoded.gen === 'number' ? decoded.gen : 0 };
   } catch (err) {
     return { ok: false, reason: (err as Error).name === 'TokenExpiredError' ? 'expired' : 'invalid' };
   }

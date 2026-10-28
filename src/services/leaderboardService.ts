@@ -1,6 +1,8 @@
 import { config } from '../config';
 import { col, FieldValue, Timestamp } from '../firebase';
 import { TtlCache } from '../utils/ttlCache';
+import { logger } from '../utils/logger';
+import { referralService } from './referralService';
 
 /**
  * The world leaderboard: kingdom_leaderboard/{playerId}, a collection of its own that holds only
@@ -98,6 +100,8 @@ export const leaderboardService = {
       rankCache.delete(playerId);
       // The player's own record keeps the level too (for support), off the request's path.
       void col.players().doc(playerId).update({ level: result.level, levelUpdatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
+      // An invited friend reaching the level that counts for their inviter.
+      void referralService.onLevel(playerId, result.level).catch((err) => logger.warn({ err, playerId }, 'referral: level not counted'));
     }
     return result;
   },

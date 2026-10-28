@@ -82,6 +82,10 @@ export const config = {
     leaderboard: `${env.COLLECTION_PREFIX}leaderboard`,
     purchases: `${env.COLLECTION_PREFIX}purchases`,
     logs: `${env.COLLECTION_PREFIX}logs`,
+    usernames: `${env.COLLECTION_PREFIX}usernames`,
+    saves: `${env.COLLECTION_PREFIX}saves`,
+    invites: `${env.COLLECTION_PREFIX}invites`,
+    referrals: `${env.COLLECTION_PREFIX}referrals`,
   },
 
   jwt: {

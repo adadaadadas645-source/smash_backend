@@ -47,7 +47,9 @@ test('catalog: the two offers of the "Continue?" popup, as the game gives them',
 
 test('tokens: issue and verify; a wrong secret fails', () => {
   const { token } = issueAccessToken('p_abcdefghijklmnop');
-  assert.deepEqual(verifyAccessToken(token), { ok: true, playerId: 'p_abcdefghijklmnop' });
+  assert.deepEqual(verifyAccessToken(token), { ok: true, playerId: 'p_abcdefghijklmnop', gen: 0 });
+  // An account moved to another device raises the generation its tokens carry.
+  assert.deepEqual(verifyAccessToken(issueAccessToken('p_abcdefghijklmnop', 3).token), { ok: true, playerId: 'p_abcdefghijklmnop', gen: 3 });
   assert.equal(verifyAccessToken(token + 'x').ok, false);
   const h = hashDeviceSecret('a'.repeat(64));
   assert.equal(deviceSecretMatches('a'.repeat(64), h), true);
@@ -96,4 +98,62 @@ test('TtlCache: one load for many callers at once', async () => {
   const values = await Promise.all(Array.from({ length: 50 }, () => cache.getOrLoad('k', load)));
   assert.equal(loads, 1);
   assert.ok(values.every((v) => v === 7));
+});
+
+// ── The account and the cloud save ─────────────────────────────────────────────
+
+import { hashPassword, passwordMatches, usernameKey, usernameSchema } from '../src/services/accountService';
+import { coinsLookWrong, summarize } from '../src/services/saveService';
+
+test('usernameSchema: 3-16 letters, digits, "_" or "."; any alphabet; no spaces', () => {
+  assert.equal(usernameSchema.parse('  Ali_2024 '), 'Ali_2024');
+  assert.equal(usernameSchema.parse('Şükrü.Çelik'), 'Şükrü.Çelik');
+  assert.equal(usernameSchema.safeParse('ab').success, false);
+  assert.equal(usernameSchema.safeParse('ali veli').success, false);
+  assert.equal(usernameSchema.safeParse('a'.repeat(17)).success, false);
+  assert.equal(usernameSchema.safeParse('<script>').success, false);
+});
+
+test('usernameKey: one name whatever its case', () => {
+  assert.equal(usernameKey('KingAli'), usernameKey('kingali'));
+});
+
+test('passwords: hashed with a salt, checked, wrong ones refused', async () => {
+  const a = await hashPassword('1234');
+  const b = await hashPassword('1234');
+  assert.notEqual(a, b);
+  assert.equal(await passwordMatches('1234', a), true);
+  assert.equal(await passwordMatches('12345', a), false);
+  assert.equal(await passwordMatches('1234', 'nonsense'), false);
+  assert.equal(await passwordMatches('1234', null), false);
+});
+
+test('summarize: level, coins and boosters out of the progress key', () => {
+  const keys = { royal_smash_progress_v1: JSON.stringify({ level: 42, coins: 1234, boosters: { giant: { count: 3, intro: true }, bomb: { count: 2 } } }) };
+  assert.deepEqual(summarize(keys), { level: 42, coins: 1234, boosters: { giant: 3, bomb: 2 } });
+  assert.deepEqual(summarize({ royal_smash_progress_v1: 'not json' }), { level: 0, coins: 0, boosters: {} });
+});
+
+test('coinsLookWrong: purchases and levels allow for the coins', () => {
+  assert.equal(coinsLookWrong(5000, 10, 0), false);
+  assert.equal(coinsLookWrong(120_000, 10, 100_000), false);
+  assert.equal(coinsLookWrong(999_999, 10, 0), true);
+});
+
+// ── Invite Friends ─────────────────────────────────────────────────────────────
+
+import { claimableRewards, normalizeCode } from '../src/services/referralService';
+
+test('claimableRewards: one reward per two friends who reached the level, each taken once', () => {
+  assert.equal(claimableRewards(0, 0), 0);
+  assert.equal(claimableRewards(1, 0), 0);
+  assert.equal(claimableRewards(2, 0), 1);
+  assert.equal(claimableRewards(5, 1), 1);
+  assert.equal(claimableRewards(4, 2), 0);
+  assert.equal(claimableRewards(2, 5), 0);
+});
+
+test('normalizeCode: upper case, letters and digits only', () => {
+  assert.equal(normalizeCode(' ab3-x9k7q '), 'AB3X9K7Q');
+  assert.equal(normalizeCode('inv%3D'), 'INV3D');
 });

@@ -165,6 +165,9 @@ export const purchaseService = {
           lastPurchaseProduct: product.id,
         };
         if (product.noAdsMin === -1) playerUpdate.noAdsForever = true;
+        if (product.coins > 0) playerUpdate.purchasedCoins = FieldValue.increment(product.coins);
+        if (product.giant > 0) playerUpdate.purchasedGiant = FieldValue.increment(product.giant);
+        if (product.bombs > 0) playerUpdate.purchasedBombs = FieldValue.increment(product.bombs);
         tx.update(col.players().doc(playerId), playerUpdate);
       });
     } catch (err) {

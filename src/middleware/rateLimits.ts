@@ -34,6 +34,12 @@ export const limits = {
   player: make('player', 60_000, 120, byPlayer),
   leaderboardWrite: make('leaderboardWrite', 60_000, 20, byPlayer),
   purchases: make('purchases', 60_000, 30, byPlayer),
+  /** Opening an account on a new device, per IP (guessing passwords; each account also locks itself). */
+  recover: make('recover', 15 * 60_000, 20),
+  /** Making the account, per player. */
+  account: make('account', 60 * 60_000, 20, byPlayer),
+  /** The cloud save, per player (the game sends it a few seconds after a change). */
+  save: make('save', 60_000, 20, byPlayer),
   clientLogs: make('clientLogs', 60_000, 30, byPlayer),
   admin: make('admin', 60_000, 120),
 };

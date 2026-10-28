@@ -9,11 +9,14 @@ import { AppError } from './errorHandler';
 
 export interface PlayerRequest extends Request {
   playerId: string;
+  /** The token's session generation (AccessClaims.gen). */
+  tokenGen: number;
 }
 
 /**
  * Bearer token -> the player. Answers 401 `token_expired` / `invalid_token` (the game then signs
- * in again with its device secret), 401 `player_not_found`, or 403 `player_banned`.
+ * in again with its device secret), 401 `player_not_found`, 401 `session_replaced` (the account
+ * was opened on another device with its username and password), or 403 `player_banned`.
  */
 export async function requirePlayer(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
@@ -34,7 +37,12 @@ export async function requirePlayer(req: Request, _res: Response, next: NextFunc
       logSecurityEvent('banned_player_request', { playerId: result.playerId });
       throw new AppError(403, 'player_banned');
     }
+    if (result.gen !== status.gen) {
+      logSecurityEvent('session_replaced', { playerId: result.playerId, tokenGen: result.gen, gen: status.gen });
+      throw new AppError(401, 'session_replaced');
+    }
     (req as PlayerRequest).playerId = result.playerId;
+    (req as PlayerRequest).tokenGen = result.gen;
     playerService.touch(result.playerId);
     logger.debug({ playerId: result.playerId }, 'Player authenticated');
     next();
