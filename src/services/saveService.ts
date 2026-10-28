@@ -35,6 +35,7 @@ export const SAVE_KEYS = [
   'royal_smash_wall_v1',
   'royal_smash_party_free_v1',
   'royal_smash_party_ads_v1',
+  'royal_smash_piggy_v1',
 ] as const;
 
 const MAX_VALUE = 16 * 1024;

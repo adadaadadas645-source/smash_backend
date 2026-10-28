@@ -38,6 +38,8 @@ export const PRODUCTS: Record<string, Product> = Object.fromEntries(
     p('offer_royal_deal', 0, H, 0, 2, 2),
     p('offer_special', 1000, 0, 0, 1, 0),
     p('remove_ads', 0, 0, -1, 0, 0, true),
+    // Goldie's piggy bank: the coins it holds are the game's (its save), not a fixed number.
+    p('piggy_bank', 0),
   ].map((x) => [x.id, x]),
 );
 
