@@ -46,7 +46,7 @@ const schema = z.object({
   ALLOW_TEST_PURCHASES: bool(true),
 
   LEADERBOARD_MAX_LEVEL: int(5000),
-  LEADERBOARD_TOP_LIMIT: int(100),
+  LEADERBOARD_TOP_LIMIT: int(1000),
   LEADERBOARD_CACHE_SECONDS: int(30),
 
   /** Every API request is also written to Firestore (kingdom_logs), buffered, off the request path. */
@@ -106,7 +106,7 @@ export const config = {
 
   leaderboard: {
     maxLevel: env.LEADERBOARD_MAX_LEVEL,
-    topLimit: Math.min(200, Math.max(10, env.LEADERBOARD_TOP_LIMIT)),
+    topLimit: Math.min(1000, Math.max(10, env.LEADERBOARD_TOP_LIMIT)),
     cacheMs: Math.max(5, env.LEADERBOARD_CACHE_SECONDS) * 1000,
   },
 
