@@ -38,6 +38,18 @@ export const PRODUCTS: Record<string, Product> = Object.fromEntries(
     p('offer_royal_deal', 0, H, 0, 2, 2),
     p('offer_special', 1000, 0, 0, 1, 0),
     p('remove_ads', 0, 0, -1, 0, 0, true),
+    // The level campaigns (1+1 and the rest, Campaigns.cs): what each gives is the game's own table
+    // (coins, boosters, the Wizard's powers); the server only checks the purchase is real and once.
+    p('camp_one_plus_one', 0),
+    p('camp_rocket_rush', 0),
+    p('camp_bomb_blast', 0),
+    p('camp_double_treasure', 0),
+    p('camp_lightning_storm', 0),
+    p('camp_giant_parade', 0),
+    p('camp_earthquake', 0),
+    p('camp_wizard_feast', 0),
+    p('camp_magnet_madness', 0),
+    p('camp_royal_mega', 0),
     // Goldie's piggy bank: the coins it holds are the game's (its save), not a fixed number.
     p('piggy_bank', 0),
   ].map((x) => [x.id, x]),
