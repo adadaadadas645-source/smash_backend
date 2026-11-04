@@ -7,6 +7,7 @@ import { errorHandler, notFound } from './middleware/errorHandler';
 import { limits } from './middleware/rateLimits';
 import { requestContext } from './middleware/requestContext';
 import { requestLogger } from './middleware/requestLogger';
+import { createAccountPageRouter } from './routes/accountPage';
 import { createAdminRouter } from './routes/admin';
 import { createAuthRouter } from './routes/auth';
 import { createClientLogRouter } from './routes/clientLogs';
@@ -62,6 +63,8 @@ export function createApp(): express.Express {
   mount(`${API}/logs`, createClientLogRouter(), 'clientLogs');
   mount(`${API}/referrals`, createReferralRouter(), 'referrals');
   mount(`${API}/admin`, createAdminRouter(), 'admin');
+  // The account deletion page (Google Play's "Delete account URL"): https://<host>/account/delete
+  mount('/account', createAccountPageRouter(), 'accountPage');
 
   app.use(notFound);
   app.use(errorHandler);

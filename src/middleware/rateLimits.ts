@@ -36,6 +36,8 @@ export const limits = {
   purchases: make('purchases', 60_000, 30, byPlayer),
   /** Opening an account on a new device, per IP (guessing passwords; each account also locks itself). */
   recover: make('recover', 15 * 60_000, 20),
+  /** The account deletion web page, per IP (guessing passwords; each account also locks itself). */
+  deletePage: make('deletePage', 15 * 60_000, 20),
   /** Making the account, per player. */
   account: make('account', 60 * 60_000, 20, byPlayer),
   /** The cloud save, per player (the game sends it a few seconds after a change). */

@@ -142,15 +142,19 @@ test('coinsLookWrong: purchases and levels allow for the coins', () => {
 
 // ── Invite Friends ─────────────────────────────────────────────────────────────
 
-import { claimableRewards, normalizeCode } from '../src/services/referralService';
+import { claimableRewards, normalizeCode, tierAt, tierCoins } from '../src/services/referralService';
 
-test('claimableRewards: one reward per two friends who reached the level, each taken once', () => {
+test('claimableRewards: tiers at 2, 4, 8, 16 friends who reached the level, each taken once', () => {
   assert.equal(claimableRewards(0, 0), 0);
   assert.equal(claimableRewards(1, 0), 0);
   assert.equal(claimableRewards(2, 0), 1);
-  assert.equal(claimableRewards(5, 1), 1);
-  assert.equal(claimableRewards(4, 2), 0);
+  assert.equal(claimableRewards(3, 1), 0);
+  assert.equal(claimableRewards(4, 1), 1);
+  assert.equal(claimableRewards(8, 0), 3);
+  assert.equal(claimableRewards(7, 2), 0);
   assert.equal(claimableRewards(2, 5), 0);
+  assert.deepEqual([0, 1, 2, 3, 4, 5].map(tierAt), [2, 4, 8, 16, 32, 64]);
+  assert.deepEqual([0, 1, 2, 3, 4, 9].map(tierCoins), [1000, 2500, 5000, 10000, 20000, 20000]);
 });
 
 test('normalizeCode: upper case, letters and digits only', () => {

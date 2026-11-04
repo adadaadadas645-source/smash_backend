@@ -10,16 +10,28 @@ import { dbLog } from './logStore';
  * as a Play Store link whose install referrer carries it. A new player's game reads it on its
  * first launch and joins with it (POST /referrals/join): the friend gets a welcome gift, and
  * the inviter counts one more friend. The friend counts toward the inviter's rewards once they
- * reach level QUALIFY_LEVEL (the leaderboard's checked level, onLevel); every FRIENDS_PER_REWARD
- * of those pays REWARD_COINS, taken with POST /referrals/reward.
+ * reach level QUALIFY_LEVEL (the leaderboard's checked level, onLevel). The rewards come in
+ * tiers that double: 2 friends, then 4, then 8, 16…, each paying more (tierCoins), each taken
+ * once with POST /referrals/reward.
  *
  * kingdom_invites/{code}       -> { playerId }                 (codes are unique)
  * kingdom_referrals/{friendId} -> { inviter, friend, joinedAt, qualified, qualifiedAt }
  * kingdom_players/{id}           inviteCode, invitedBy, invitesJoined, invitesQualified, inviteRewards
  */
 export const QUALIFY_LEVEL = 20;
-export const FRIENDS_PER_REWARD = 2;
-export const REWARD_COINS = 1000;
+/** Friends (who reached QUALIFY_LEVEL) for the first reward; each tier after it doubles them. */
+export const FIRST_TIER = 2;
+/** Each tier's coins: 1000, 2500, 5000, 10000, then 20000 for every tier after. */
+const TIER_COINS = [1000, 2500, 5000, 10000, 20000];
+/** Friends tier `i` (0-based) asks for: 2, 4, 8, 16… */
+export const tierAt = (i: number) => FIRST_TIER * 2 ** i;
+export const tierCoins = (i: number) => TIER_COINS[Math.min(i, TIER_COINS.length - 1)];
+/** Tiers `qualified` friends have reached. */
+export const tiersReached = (qualified: number) => {
+  let n = 0;
+  while (n < 30 && qualified >= tierAt(n)) n++;
+  return n;
+};
 export const WELCOME_COINS = 500;
 /** A code is taken only by a player this new (it is for new installs). */
 const JOIN_WITHIN_MS = 7 * 86400_000;
@@ -41,14 +53,19 @@ export interface ReferralStatus {
   qualified: number;
   rewarded: number;
   claimable: number;
+  /** The next reward's friends span (from prevAt to nextAt), for older games. */
   perReward: number;
+  /** The next reward to take (or to earn): its coins, and the friends it asks for. */
   rewardCoins: number;
+  prevAt: number;
+  nextAt: number;
+  tier: number;
   qualifyLevel: number;
   invitedBy: boolean;
 }
 
 /** Rewards earned by `qualified` friends and not yet taken. */
-export const claimableRewards = (qualified: number, rewarded: number) => Math.max(0, Math.floor(qualified / FRIENDS_PER_REWARD) - rewarded);
+export const claimableRewards = (qualified: number, rewarded: number) => Math.max(0, tiersReached(qualified) - rewarded);
 
 export const referralService = {
   /** The player's code, made (and reserved) the first time. */
@@ -82,14 +99,19 @@ export const referralService = {
     const snap = await col.players().doc(playerId).get();
     const qualified = (snap.get('invitesQualified') as number | undefined) ?? 0;
     const rewarded = (snap.get('inviteRewards') as number | undefined) ?? 0;
+    const prevAt = rewarded > 0 ? tierAt(rewarded - 1) : 0;
+    const nextAt = tierAt(rewarded);
     return {
       code,
       joined: (snap.get('invitesJoined') as number | undefined) ?? 0,
       qualified,
       rewarded,
       claimable: claimableRewards(qualified, rewarded),
-      perReward: FRIENDS_PER_REWARD,
-      rewardCoins: REWARD_COINS,
+      perReward: nextAt - prevAt,
+      rewardCoins: tierCoins(rewarded),
+      prevAt,
+      nextAt,
+      tier: rewarded,
       qualifyLevel: QUALIFY_LEVEL,
       invitedBy: !!snap.get('invitedBy'),
     };
@@ -149,7 +171,7 @@ export const referralService = {
   /** Takes one earned reward; answers its coins. */
   async reward(playerId: string): Promise<{ coins: number; status: ReferralStatus }> {
     const ref = col.players().doc(playerId);
-    await col.players().firestore.runTransaction(async (tx) => {
+    const coins = await col.players().firestore.runTransaction(async (tx) => {
       const me = await tx.get(ref);
       const qualified = (me.get('invitesQualified') as number | undefined) ?? 0;
       const rewarded = (me.get('inviteRewards') as number | undefined) ?? 0;
@@ -158,9 +180,10 @@ export const referralService = {
         throw new AppError(409, 'nothing_to_claim');
       }
       tx.update(ref, { inviteRewards: rewarded + 1, inviteRewardAt: FieldValue.serverTimestamp() });
+      return tierCoins(rewarded);
     });
-    logBusinessEvent('referral_reward', { playerId, coins: REWARD_COINS });
-    dbLog.event('referral_reward', { coins: REWARD_COINS }, playerId);
-    return { coins: REWARD_COINS, status: await this.status(playerId) };
+    logBusinessEvent('referral_reward', { playerId, coins });
+    dbLog.event('referral_reward', { coins }, playerId);
+    return { coins, status: await this.status(playerId) };
   },
 };

@@ -5,6 +5,7 @@ import { col, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { currentContext } from '../utils/context';
 import { logBusinessEvent, logSecurityEvent, logger } from '../utils/logger';
+import { leaderboardService } from './leaderboardService';
 import { dbLog } from './logStore';
 import { PlayerDoc, playerService } from './playerService';
 import { hashDeviceSecret } from './tokenService';
@@ -18,6 +19,11 @@ const scrypt = promisify(scryptCb) as (password: string, salt: Buffer, keylen: n
  * goes up so the old device's tokens stop working, and the cloud save comes back with it.
  *
  * kingdom_usernames/{usernameKey} -> { playerId, username, createdAt } keeps the names unique.
+ *
+ * Deleting (Google Play's account deletion rule): from the game (DELETE /players/me) or from the
+ * web page with the username and password (/account/delete): the player, the username, the cloud
+ * save, the leaderboard row and the invite code go. The purchase records stay (the store's orders,
+ * kept for refunds and fraud checks), no longer tied to a player; the request logs expire by themselves.
  */
 
 /** 3-16 letters (any alphabet), digits, "_" and "."; no spaces. */
@@ -78,11 +84,11 @@ export const accountService = {
   },
 
   /**
-   * Opens the account on this device: right username and password, and the device's secret
-   * becomes the account's. Wrong ones count; after five in a row the account waits 15 minutes.
-   * "No such username" and "wrong password" get the same answer.
+   * The account a username and password open, or 401 `invalid_credentials`. Wrong passwords
+   * count; after five in a row the account waits 15 minutes. "No such username" and "wrong
+   * password" get the same answer, in the same time. `what` names the log events.
    */
-  async recover(rawUsername: string, password: string, deviceSecret: string): Promise<PlayerDoc> {
+  async withPassword(rawUsername: string, password: string, what: 'recover' | 'delete'): Promise<PlayerDoc> {
     const parsed = usernameSchema.safeParse(rawUsername);
     const key = parsed.success ? usernameKey(parsed.data) : null;
     const name = key ? await col.usernames().doc(key).get() : null;
@@ -93,23 +99,33 @@ export const accountService = {
     if (!doc || !doc.passwordHash) {
       dummyHash ??= hashPassword('not-a-password');
       await passwordMatches(password, await dummyHash);
-      logSecurityEvent('recover_rejected', { ...logData, found: false });
-      dbLog.security('recover_rejected', { ...logData, found: false });
+      logSecurityEvent(`${what}_rejected`, { ...logData, found: false });
+      dbLog.security(`${what}_rejected`, { ...logData, found: false });
       throw new AppError(401, 'invalid_credentials');
     }
     if (doc.lockedUntil && doc.lockedUntil.toMillis() > Date.now()) {
-      logSecurityEvent('recover_locked', logData);
+      logSecurityEvent(`${what}_locked`, logData);
       throw new AppError(429, 'account_locked', 'Too many wrong passwords, try again later', { retryAt: doc.lockedUntil.toDate().toISOString() });
     }
-    const ref = col.players().doc(doc.playerId);
     if (!(await passwordMatches(password, doc.passwordHash))) {
       const fails = (doc.failedLogins ?? 0) + 1;
       const lock = fails >= MAX_FAILS;
-      await ref.update({ failedLogins: lock ? 0 : fails, lockedUntil: lock ? Timestamp.fromMillis(Date.now() + LOCK_MS) : doc.lockedUntil ?? null });
-      logSecurityEvent('recover_rejected', { ...logData, found: true, fails, locked: lock });
-      dbLog.security('recover_rejected', { ...logData, found: true, fails, locked: lock }, doc.playerId);
+      await col.players().doc(doc.playerId).update({ failedLogins: lock ? 0 : fails, lockedUntil: lock ? Timestamp.fromMillis(Date.now() + LOCK_MS) : doc.lockedUntil ?? null });
+      logSecurityEvent(`${what}_rejected`, { ...logData, found: true, fails, locked: lock });
+      dbLog.security(`${what}_rejected`, { ...logData, found: true, fails, locked: lock }, doc.playerId);
       throw new AppError(401, 'invalid_credentials');
     }
+    return doc;
+  },
+
+  /**
+   * Opens the account on this device: right username and password (withPassword), and the
+   * device's secret becomes the account's.
+   */
+  async recover(rawUsername: string, password: string, deviceSecret: string): Promise<PlayerDoc> {
+    const doc = await this.withPassword(rawUsername, password, 'recover');
+    const logData = { username: doc.username, playerId: doc.playerId, ip: currentContext()?.ip };
+    const ref = col.players().doc(doc.playerId);
     if (doc.banned) throw new AppError(403, 'player_banned');
     const ctx = currentContext();
     await ref.update({
@@ -129,5 +145,34 @@ export const accountService = {
     dbLog.event('account_recovered', { username: fresh.username, gen: fresh.gen, platform: ctx?.platform, deviceModel: ctx?.deviceModel }, doc.playerId);
     logger.info({ playerId: doc.playerId }, 'Account opened on a new device');
     return fresh;
+  },
+
+  /**
+   * Deletes the player for good: the player, its username, cloud save, leaderboard row, invite
+   * code and referral. The purchase records stay (see above). Its tokens stop working at once
+   * (player_not_found).
+   */
+  async remove(playerId: string, how: 'game' | 'web'): Promise<void> {
+    const doc = await playerService.get(playerId);
+    if (!doc) throw new AppError(404, 'player_not_found');
+    const batch = col.players().firestore.batch();
+    if (doc.usernameKey) batch.delete(col.usernames().doc(doc.usernameKey));
+    const inviteCode = (doc as PlayerDoc & { inviteCode?: string }).inviteCode;
+    if (inviteCode) batch.delete(col.invites().doc(inviteCode));
+    batch.delete(col.saves().doc(playerId));
+    batch.delete(col.referrals().doc(playerId));
+    batch.delete(col.players().doc(playerId));
+    await batch.commit();
+    await leaderboardService.remove(playerId);
+    playerService.forgetStatus(playerId);
+    logBusinessEvent('account_deleted', { playerId, how, hadUsername: !!doc.username });
+    dbLog.event('account_deleted', { how, hadUsername: !!doc.username }, playerId);
+    logger.info({ playerId, how }, 'Player deleted');
+  },
+
+  /** The web page's deletion: the username and password say whose (withPassword). */
+  async removeWithPassword(rawUsername: string, password: string): Promise<void> {
+    const doc = await this.withPassword(rawUsername, password, 'delete');
+    await this.remove(doc.playerId, 'web');
   },
 };

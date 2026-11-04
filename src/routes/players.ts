@@ -15,6 +15,7 @@ import { saveSchema, saveService } from '../services/saveService';
  * POST  /players/me/account  { username, password } -> { player }  (once: 409 username_taken / account_exists)
  * GET   /players/me/save  -> { save: { rev, keys } | null }
  * PUT   /players/me/save  { rev, keys } -> { rev }  (409 stale_save when a newer one is stored)
+ * DELETE /players/me  -> { deleted: true }  (the player and all that is theirs, for good: accountService.remove)
  */
 export function createPlayerRouter(): Router {
   const router = Router();
@@ -47,6 +48,15 @@ export function createPlayerRouter(): Router {
       const body = z.object({ username: z.string().max(64), password: z.string().max(64) }).parse(req.body);
       const doc = await accountService.create(req.playerId, body.username, body.password);
       res.status(201).json({ success: true, player: publicPlayer(doc) });
+    }),
+  );
+
+  router.delete(
+    '/me',
+    limits.account,
+    asyncRoute<PlayerRequest>(async (req, res) => {
+      await accountService.remove(req.playerId, 'game');
+      res.json({ success: true, deleted: true });
     }),
   );
 
