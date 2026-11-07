@@ -11,8 +11,8 @@ import { errorInfo } from '../utils/safeLog';
  * comes over TLS from Apple to a request signed with that key, so its signed transaction is
  * read as Apple sent it.
  *
- * Production is asked first; a transaction it does not know (404) is asked of the sandbox
- * (TestFlight and sandbox testers), as Apple recommends.
+ * Production and the sandbox (TestFlight and sandbox testers) are asked at once; the sandbox's
+ * answer counts only for a transaction production does not know (404).
  */
 export interface AppleTransaction {
   transactionId: string;
@@ -93,7 +93,9 @@ async function ask(env: keyof typeof HOSTS, transactionId: string): Promise<Appl
 
 export async function checkTransaction(transactionId: string): Promise<AppleCheck> {
   if (!appStoreConfigured()) return { kind: 'unavailable', reason: 'no_iap_key' };
-  const prod = await ask('Production', transactionId);
+  // Both environments at once: a sandbox purchase (TestFlight, App Review) waited for production's
+  // 404 first, two round trips to Apple before the game heard back. Production's answer wins.
+  const [prod, sandbox] = await Promise.all([ask('Production', transactionId), ask('Sandbox', transactionId)]);
   if (prod.kind !== 'not_found') return prod;
-  return ask('Sandbox', transactionId);
+  return sandbox;
 }
