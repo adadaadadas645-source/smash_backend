@@ -14,7 +14,9 @@ import { createClientLogRouter } from './routes/clientLogs';
 import { createLeaderboardRouter } from './routes/leaderboard';
 import { createReferralRouter } from './routes/referrals';
 import { createPlayerRouter } from './routes/players';
+import { createIosPurchaseRouter } from './routes/iosPurchases';
 import { createPurchaseRouter } from './routes/purchases';
+import { appStoreConfigured } from './services/appStore';
 import { googlePlayConfigured } from './services/googlePlay';
 import { dbLog, startLogStore, stopLogStore } from './services/logStore';
 import { logger } from './utils/logger';
@@ -45,7 +47,7 @@ export function createApp(): express.Express {
   app.get('/health/deep', async (_req, res) => {
     try {
       const firestoreMs = await pingFirestore();
-      res.json({ ok: true, firestoreMs, googlePlayApi: googlePlayConfigured(), licenseKey: !!config.play.licenseKey, version: config.version });
+      res.json({ ok: true, firestoreMs, googlePlayApi: googlePlayConfigured(), licenseKey: !!config.play.licenseKey, appStoreApi: appStoreConfigured(), version: config.version });
     } catch (err) {
       logger.error({ err: errorInfo(err) }, 'Deep health check failed');
       res.status(503).json({ ok: false, error: 'firestore_unreachable' });
@@ -59,6 +61,8 @@ export function createApp(): express.Express {
   mount(`${API}/auth`, createAuthRouter(), 'auth');
   mount(`${API}/players`, createPlayerRouter(), 'players');
   mount(`${API}/leaderboard`, createLeaderboardRouter(), 'leaderboard');
+  // The App Store's own purchase endpoint (kingdom_purchases_ios), ahead of Google Play's.
+  mount(`${API}/purchases/ios`, createIosPurchaseRouter(), 'iosPurchases');
   mount(`${API}/purchases`, createPurchaseRouter(), 'purchases');
   mount(`${API}/logs`, createClientLogRouter(), 'clientLogs');
   mount(`${API}/referrals`, createReferralRouter(), 'referrals');
@@ -81,6 +85,8 @@ function start(): void {
       googlePlayApi: googlePlayConfigured(),
       licenseKey: !!config.play.licenseKey,
       allowTestPurchases: config.play.allowTestPurchases,
+      appStoreApi: appStoreConfigured(),
+      allowSandboxPurchases: config.apple.allowSandboxPurchases,
       logsToDb: config.logs.toDb,
       admin: !!config.adminApiKey,
     },

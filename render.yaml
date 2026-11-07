@@ -24,7 +24,7 @@ services:
       - key: ANDROID_PACKAGE_NAME
         value: com.puzzle.blockescape
       - key: ALLOW_TEST_PURCHASES
-        value: "true"
+        value: "false"
       - key: LOG_REQUESTS_TO_DB
         value: "true"
       - key: LOG_RETENTION_DAYS
@@ -40,4 +40,14 @@ services:
       - key: GOOGLE_PLAY_LICENSE_KEY
         sync: false
       - key: GOOGLE_PLAY_SERVICE_ACCOUNT_KEY
+        sync: false
+      - key: IOS_BUNDLE_ID
+        value: com.puzzle.royalsmash
+      - key: ALLOW_SANDBOX_PURCHASES
+        value: "true"
+      - key: APPLE_IAP_KEY_ID
+        sync: false
+      - key: APPLE_IAP_ISSUER_ID
+        sync: false
+      - key: APPLE_IAP_PRIVATE_KEY
         sync: false

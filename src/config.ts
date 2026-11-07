@@ -45,6 +45,14 @@ const schema = z.object({
   /** Test purchases (license testers, closed test) are granted when true. */
   ALLOW_TEST_PURCHASES: bool(true),
 
+  IOS_BUNDLE_ID: z.string().default('com.puzzle.royalsmash'),
+  /** App Store Connect -> Users and Access -> Integrations -> In-App Purchase: the key's id, the team's issuer id and the .p8 file's text (newlines as \n). */
+  APPLE_IAP_KEY_ID: z.string().optional(),
+  APPLE_IAP_ISSUER_ID: z.string().optional(),
+  APPLE_IAP_PRIVATE_KEY: z.string().optional(),
+  /** Sandbox purchases (TestFlight, sandbox testers) are granted when true. Falls back to ALLOW_TEST_PURCHASES. */
+  ALLOW_SANDBOX_PURCHASES: z.string().optional(),
+
   LEADERBOARD_MAX_LEVEL: int(5000),
   LEADERBOARD_TOP_LIMIT: int(1000),
   LEADERBOARD_CACHE_SECONDS: int(30),
@@ -81,6 +89,8 @@ export const config = {
     players: `${env.COLLECTION_PREFIX}players`,
     leaderboard: `${env.COLLECTION_PREFIX}leaderboard`,
     purchases: `${env.COLLECTION_PREFIX}purchases`,
+    /** The App Store's purchases, apart from Google Play's. */
+    purchasesIos: `${env.COLLECTION_PREFIX}purchases_ios`,
     logs: `${env.COLLECTION_PREFIX}logs`,
     usernames: `${env.COLLECTION_PREFIX}usernames`,
     saves: `${env.COLLECTION_PREFIX}saves`,
@@ -102,6 +112,17 @@ export const config = {
     serviceAccountKey: env.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY || env.FIREBASE_SERVICE_ACCOUNT_KEY,
     licenseKey: env.GOOGLE_PLAY_LICENSE_KEY || null,
     allowTestPurchases: env.ALLOW_TEST_PURCHASES,
+  },
+
+  apple: {
+    bundleId: env.IOS_BUNDLE_ID,
+    keyId: env.APPLE_IAP_KEY_ID || null,
+    issuerId: env.APPLE_IAP_ISSUER_ID || null,
+    privateKey: env.APPLE_IAP_PRIVATE_KEY ? env.APPLE_IAP_PRIVATE_KEY.replace(/\\n/g, '\n') : null,
+    allowSandboxPurchases:
+      env.ALLOW_SANDBOX_PURCHASES === undefined || env.ALLOW_SANDBOX_PURCHASES === ''
+        ? env.ALLOW_TEST_PURCHASES
+        : ['1', 'true', 'yes', 'on'].includes(env.ALLOW_SANDBOX_PURCHASES.toLowerCase()),
   },
 
   leaderboard: {

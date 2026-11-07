@@ -42,6 +42,7 @@ export const col = {
   players: () => db.collection(config.collections.players),
   leaderboard: () => db.collection(config.collections.leaderboard),
   purchases: () => db.collection(config.collections.purchases),
+  purchasesIos: () => db.collection(config.collections.purchasesIos),
   logs: () => db.collection(config.collections.logs),
   usernames: () => db.collection(config.collections.usernames),
   saves: () => db.collection(config.collections.saves),

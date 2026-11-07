@@ -7,7 +7,9 @@ process.env.LOG_REQUESTS_TO_DB = 'false';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { test } from 'node:test';
+import { jwsPayload } from '../src/services/appStore';
 import { findProduct } from '../src/services/catalog';
+import { transactionIdOf } from '../src/services/iosPurchaseService';
 import { allowedLevel } from '../src/services/leaderboardService';
 import { cleanName } from '../src/services/profile';
 import { parseUnityReceipt, signatureValid } from '../src/services/receipt';
@@ -77,6 +79,22 @@ test('receipt: parsed from the Unity IAP shape, signature checked with the licen
 test('receipt: other stores and broken receipts are refused', () => {
   assert.throws(() => parseUnityReceipt(JSON.stringify({ Store: 'fake', Payload: '{}' })), /not verified/);
   assert.throws(() => parseUnityReceipt('not json'), /not JSON/);
+});
+
+test('ios receipt: the transaction id comes out of Unity IAP\'s App Store receipt', () => {
+  const receipt = JSON.stringify({ Store: 'AppleAppStore', TransactionID: '2000000812345678', Payload: 'MIIT...' });
+  assert.equal(transactionIdOf({ receipt }), '2000000812345678');
+  assert.equal(transactionIdOf({ transactionId: '42' }), '42');
+  assert.throws(() => transactionIdOf({ receipt: JSON.stringify({ Store: 'GooglePlay', TransactionID: '1' }) }));
+  assert.throws(() => transactionIdOf({ receipt: JSON.stringify({ Store: 'AppleAppStore', TransactionID: 'abc' }) }));
+  assert.throws(() => transactionIdOf({}));
+});
+
+test('ios: the signed transaction Apple returns is read back', () => {
+  const tx = { transactionId: '1', originalTransactionId: '1', bundleId: 'com.puzzle.royalsmash', productId: 'gold_1000', environment: 'Sandbox' };
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const jws = `${b64({ alg: 'ES256' })}.${b64(tx)}.sig`;
+  assert.deepEqual(jwsPayload(jws), tx);
 });
 
 test('safeForLog: masks secrets, shortens tokens', () => {
