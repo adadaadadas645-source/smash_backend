@@ -96,21 +96,29 @@ async function ask(env: keyof typeof HOSTS, transactionId: string): Promise<Appl
  * the healthy answer (the key signs in, the transaction is simply unknown); 401 is a key Apple
  * refuses; an error is one that never reached Apple (a .p8 that does not read, the network).
  */
-export async function appStoreProbe(): Promise<string> {
+export async function appStoreProbe(): Promise<{ production: string; sandbox: string } | string> {
   if (!appStoreConfigured()) return 'no_iap_key';
-  try {
-    const res = await fetch(`${HOSTS.Sandbox}/inApps/v1/transactions/1`, { headers: { Authorization: `Bearer ${bearer()}` }, signal: AbortSignal.timeout(10_000) });
-    return res.status === 404 ? 'ok' : `apple_${res.status}`;
-  } catch (err) {
-    return `error: ${(err as Error).message}`.slice(0, 160);
-  }
+  const one = async (env: keyof typeof HOSTS) => {
+    try {
+      const res = await fetch(`${HOSTS[env]}/inApps/v1/transactions/1`, { headers: { Authorization: `Bearer ${bearer()}` }, signal: AbortSignal.timeout(10_000) });
+      return res.status === 404 ? 'ok' : `apple_${res.status}`;
+    } catch (err) {
+      return `error: ${(err as Error).message}`.slice(0, 160);
+    }
+  };
+  const [production, sandbox] = await Promise.all([one('Production'), one('Sandbox')]);
+  return { production, sandbox };
 }
 
 export async function checkTransaction(transactionId: string): Promise<AppleCheck> {
   if (!appStoreConfigured()) return { kind: 'unavailable', reason: 'no_iap_key' };
   // Both environments at once: a sandbox purchase (TestFlight, App Review) waited for production's
   // 404 first, two round trips to Apple before the game heard back. Production's answer wins.
+  // Whichever knows the transaction answers: production first, else the sandbox, else production
+  // refusing (an app not on the store yet) must not hide the sandbox's answer for a TestFlight purchase.
   const [prod, sandbox] = await Promise.all([ask('Production', transactionId), ask('Sandbox', transactionId)]);
-  if (prod.kind !== 'not_found') return prod;
-  return sandbox;
+  if (prod.kind === 'ok') return prod;
+  if (sandbox.kind === 'ok') return sandbox;
+  if (prod.kind === 'not_found' && sandbox.kind === 'not_found') return prod;
+  return prod.kind === 'unavailable' ? prod : sandbox;
 }
