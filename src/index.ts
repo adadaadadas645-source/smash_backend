@@ -16,7 +16,7 @@ import { createReferralRouter } from './routes/referrals';
 import { createPlayerRouter } from './routes/players';
 import { createIosPurchaseRouter } from './routes/iosPurchases';
 import { createPurchaseRouter } from './routes/purchases';
-import { appStoreConfigured } from './services/appStore';
+import { appStoreConfigured, appStoreProbe } from './services/appStore';
 import { googlePlayConfigured } from './services/googlePlay';
 import { dbLog, startLogStore, stopLogStore } from './services/logStore';
 import { logger } from './utils/logger';
@@ -47,7 +47,7 @@ export function createApp(): express.Express {
   app.get('/health/deep', async (_req, res) => {
     try {
       const firestoreMs = await pingFirestore();
-      res.json({ ok: true, firestoreMs, googlePlayApi: googlePlayConfigured(), licenseKey: !!config.play.licenseKey, appStoreApi: appStoreConfigured(), version: config.version });
+      res.json({ ok: true, firestoreMs, googlePlayApi: googlePlayConfigured(), licenseKey: !!config.play.licenseKey, appStoreApi: appStoreConfigured(), appStoreCheck: await appStoreProbe(), version: config.version });
     } catch (err) {
       logger.error({ err: errorInfo(err) }, 'Deep health check failed');
       res.status(503).json({ ok: false, error: 'firestore_unreachable' });

@@ -91,6 +91,21 @@ async function ask(env: keyof typeof HOSTS, transactionId: string): Promise<Appl
   }
 }
 
+/**
+ * For /health/deep: Apple's answer to a transaction that does not exist, from the sandbox. 404 is
+ * the healthy answer (the key signs in, the transaction is simply unknown); 401 is a key Apple
+ * refuses; an error is one that never reached Apple (a .p8 that does not read, the network).
+ */
+export async function appStoreProbe(): Promise<string> {
+  if (!appStoreConfigured()) return 'no_iap_key';
+  try {
+    const res = await fetch(`${HOSTS.Sandbox}/inApps/v1/transactions/1`, { headers: { Authorization: `Bearer ${bearer()}` }, signal: AbortSignal.timeout(10_000) });
+    return res.status === 404 ? 'ok' : `apple_${res.status}`;
+  } catch (err) {
+    return `error: ${(err as Error).message}`.slice(0, 160);
+  }
+}
+
 export async function checkTransaction(transactionId: string): Promise<AppleCheck> {
   if (!appStoreConfigured()) return { kind: 'unavailable', reason: 'no_iap_key' };
   // Both environments at once: a sandbox purchase (TestFlight, App Review) waited for production's
