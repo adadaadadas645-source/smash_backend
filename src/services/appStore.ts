@@ -77,7 +77,10 @@ async function ask(env: keyof typeof HOSTS, transactionId: string): Promise<Appl
     const durationMs = Date.now() - started;
     if (res.status === 404) return { kind: 'not_found' };
     if (!res.ok) {
-      logger.error({ env, status: res.status, durationMs }, 'appStore: transaction lookup failed');
+      // Production refuses (401) every lookup while the app is not on the store yet; the sandbox
+      // answers TestFlight's. Expected then, so a warning, not an error, on every purchase.
+      if (env === 'Production' && res.status === 401) logger.warn({ env, status: res.status, durationMs }, 'appStore: production refused the lookup (the app not on the store yet?)');
+      else logger.error({ env, status: res.status, durationMs }, 'appStore: transaction lookup failed');
       return { kind: 'unavailable', status: res.status, reason: res.status === 401 ? 'no_permission' : 'apple_error' };
     }
     const body = (await res.json()) as { signedTransactionInfo?: string };
