@@ -10,7 +10,7 @@ import { logBusinessEvent } from '../utils/logger';
 /**
  * GET  /teams/mine                 -> { team, members } | { team: null }
  * GET  /teams/recommended          -> { teams }
- * GET  /teams/top                  -> { teams }          (the team board)
+ * GET  /teams/top?country=TR       -> { teams }          (the team board: the world's, or a country's)
  * GET  /teams/search?q=            -> { teams }
  * GET  /teams/:id                  -> { team, members }
  * POST /teams                      { name, description, crest, type, minLevel, minCrowns } -> { id }
@@ -35,7 +35,7 @@ export function createTeamRouter(): Router {
     res.json({ success: true, ...(await teamService.info(m.teamId)), role: m.role });
   }));
   router.get('/recommended', asyncRoute<PlayerRequest>(async (_req, res) => res.json({ success: true, teams: await teamService.recommended() })));
-  router.get('/top', asyncRoute<PlayerRequest>(async (_req, res) => res.json({ success: true, teams: await teamService.top() })));
+  router.get('/top', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, teams: await teamService.top(String(req.query.country ?? '').toUpperCase() || undefined) })));
   router.get('/search', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, teams: await teamService.search(String(req.query.q ?? '')) })));
   router.get('/chat', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await teamService.messages(req.playerId)) })));
 

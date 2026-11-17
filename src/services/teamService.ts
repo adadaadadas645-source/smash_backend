@@ -54,6 +54,8 @@ export interface TeamDoc {
   members: number;
   score: number;
   leaderId: string;
+  /** The founder's country ("TR"), for the country's team board; null when not known. */
+  country?: string | null;
   createdAt: FirebaseFirestore.Timestamp;
   activeAt: FirebaseFirestore.Timestamp;
 }
@@ -97,6 +99,7 @@ export function teamOut(id: string, t: TeamDoc) {
     members: t.members,
     capacity: MAX_MEMBERS,
     score: t.score,
+    country: t.country ?? null,
     // Activity from the last message or member change: high within a day, medium within a week.
     activity: activeHours < 24 ? 'high' : activeHours < 24 * 7 ? 'medium' : 'low',
   };
@@ -104,7 +107,12 @@ export function teamOut(id: string, t: TeamDoc) {
 
 const ROLE_ORDER: Record<Role, number> = { leader: 0, coleader: 1, knight: 2 };
 
-const listCache = new TtlCache<ReturnType<typeof teamOut>[]>(30_000, 8);
+const listCache = new TtlCache<ReturnType<typeof teamOut>[]>(30_000, 60);
+
+/** The team's name on the player's leaderboard row (the boards show it under the player's name). */
+function boardTeam(tx: FirebaseFirestore.Transaction, playerId: string, name: string | null) {
+  tx.set(col.leaderboard().doc(playerId), { team: name ?? FieldValue.delete() }, { merge: true });
+}
 
 async function profileOf(playerId: string) {
   const p = await playerService.get(playerId);
@@ -128,11 +136,20 @@ export const teamService = {
     });
   },
 
-  /** The team board, the highest score first. */
-  async top(): Promise<ReturnType<typeof teamOut>[]> {
-    return listCache.getOrLoad('top', async () => {
-      const snap = await col.teams().orderBy('score', 'desc').limit(100).get();
-      return snap.docs.map((d) => teamOut(d.id, d.data() as TeamDoc));
+  /** The team board, the highest score first: the world's, or one country's ("TR"). */
+  async top(country?: string): Promise<ReturnType<typeof teamOut>[]> {
+    const cc = country && /^[A-Z]{2}$/.test(country) ? country : null;
+    return listCache.getOrLoad(cc ? 'top_' + cc : 'top', async () => {
+      if (!cc) {
+        const snap = await col.teams().orderBy('score', 'desc').limit(100).get();
+        return snap.docs.map((d) => teamOut(d.id, d.data() as TeamDoc));
+      }
+      // One country: no composite index, sorted here.
+      const snap = await col.teams().where('country', '==', cc).limit(1000).get();
+      return snap.docs
+        .map((d) => teamOut(d.id, d.data() as TeamDoc))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 100);
     });
   },
 
@@ -166,6 +183,7 @@ export const teamService = {
     if (!taken.empty) throw new AppError(409, 'team_name_taken');
     const teamRef = col.teams().doc();
     const now = Timestamp.now();
+    const country = ((await col.leaderboard().doc(playerId).get()).get('country') as string | undefined) ?? null;
     await col.teams().firestore.runTransaction(async (tx) => {
       const mine = await tx.get(col.teamMembers().doc(playerId));
       if (mine.exists) throw new AppError(409, 'already_in_team');
@@ -180,9 +198,11 @@ export const teamService = {
         members: 1,
         score: me.level,
         leaderId: playerId,
+        country,
         createdAt: now,
         activeAt: now,
       } satisfies TeamDoc);
+      boardTeam(tx, playerId, name);
       tx.create(col.teamMembers().doc(playerId), { teamId: teamRef.id, role: 'leader', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
     });
     listCache.clear();
@@ -202,6 +222,7 @@ export const teamService = {
       if (me.level < t.minLevel) throw new AppError(403, 'level_too_low');
       // "By request" teams: the request waits for the leader (a later version); for now they are joined as open ones.
       tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(me.level), activeAt: now });
+      boardTeam(tx, playerId, t.name);
       tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: '', helpers: [], createdAt: now });
     });
@@ -228,6 +249,7 @@ export const teamService = {
     await col.teams().firestore.runTransaction(async (tx) => {
       const team = await tx.get(teamRef);
       tx.delete(memberRef);
+      boardTeam(tx, playerId, null);
       if (!team.exists) return;
       const t = team.data() as TeamDoc;
       if (t.members <= 1) {

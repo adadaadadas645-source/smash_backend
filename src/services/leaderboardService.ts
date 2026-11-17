@@ -35,6 +35,8 @@ export interface BoardRowOut {
   avatar: string;
   frame: string;
   level: number;
+  /** The player's team, when in one. */
+  team?: string;
   me?: boolean;
 }
 
@@ -113,11 +115,11 @@ export const leaderboardService = {
         .orderBy('level', 'desc')
         .orderBy('levelReachedAt', 'asc')
         .limit(config.leaderboard.topLimit)
-        .select('name', 'avatar', 'frame', 'level')
+        .select('name', 'avatar', 'frame', 'level', 'team')
         .get();
       const rows = snap.docs.map((d, i) => {
-        const x = d.data() as Pick<BoardEntry, 'name' | 'avatar' | 'frame' | 'level'>;
-        return { rank: i + 1, playerId: d.id, name: x.name, avatar: x.avatar, frame: x.frame, level: x.level };
+        const x = d.data() as Pick<BoardEntry, 'name' | 'avatar' | 'frame' | 'level'> & { team?: string };
+        return { rank: i + 1, playerId: d.id, name: x.name, avatar: x.avatar, frame: x.frame, level: x.level, ...(x.team ? { team: x.team } : {}) };
       });
       return { rows, at: new Date().toISOString() };
     });

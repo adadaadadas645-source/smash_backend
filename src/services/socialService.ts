@@ -23,7 +23,7 @@ const WEEKLY_CACHE_MS = 30_000;
 const COUNTRY_CACHE_MS = 60_000;
 const READ_LIMIT = 2000;
 
-type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number };
+type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number; team?: string };
 
 const weeklyCache = new TtlCache<Row[]>(WEEKLY_CACHE_MS, 4);
 const countryCache = new TtlCache<Row[]>(COUNTRY_CACHE_MS, 50);
@@ -54,10 +54,10 @@ function ranked<T extends { level: number; points?: number }>(rows: T[], by: 'le
 }
 
 async function boardRows(ids: string[]) {
-  if (ids.length === 0) return new Map<string, { name: string; avatar: string; frame: string; level: number }>();
+  if (ids.length === 0) return new Map<string, { name: string; avatar: string; frame: string; level: number; team?: string }>();
   const snaps = await col.leaderboard().firestore.getAll(...ids.map((id) => col.leaderboard().doc(id)));
-  const out = new Map<string, { name: string; avatar: string; frame: string; level: number }>();
-  for (const s of snaps) if (s.exists) out.set(s.id, { name: s.get('name'), avatar: s.get('avatar'), frame: s.get('frame'), level: s.get('level') ?? 1 });
+  const out = new Map<string, { name: string; avatar: string; frame: string; level: number; team?: string }>();
+  for (const s of snaps) if (s.exists) out.set(s.id, { name: s.get('name'), avatar: s.get('avatar'), frame: s.get('frame'), level: s.get('level') ?? 1, ...(s.get('team') ? { team: s.get('team') as string } : {}) });
   return out;
 }
 
@@ -83,10 +83,17 @@ export const socialService = {
     const week = weekOf(Date.now());
     const rows = await weeklyCache.getOrLoad(week.id, async () => {
       const snap = await col.weekly().where('week', '==', week.id).limit(READ_LIMIT).get();
-      return ranked(
-        snap.docs.map((d) => ({ rank: 0, playerId: d.get('playerId'), name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, points: d.get('points') ?? 0 })),
+      const rows = ranked(
+        snap.docs.map((d) => ({ rank: 0, playerId: d.get('playerId'), name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, points: d.get('points') ?? 0 }) as Row),
         'points',
       );
+      // The teams of the first hundred (the list shows them under the names).
+      const board = await boardRows(rows.slice(0, 100).map((r) => r.playerId));
+      for (const r of rows.slice(0, 100)) {
+        const team = board.get(r.playerId)?.team;
+        if (team) r.team = team;
+      }
+      return rows;
     });
     const me = rows.find((r) => r.playerId === playerId);
     return { week: week.id, endsInMs: week.endsAt - Date.now(), top: rows.slice(0, 100), me: me ? { rank: me.rank, points: me.points ?? 0 } : null, total: rows.length };
@@ -98,7 +105,7 @@ export const socialService = {
     const rows = await countryCache.getOrLoad(country, async () => {
       const snap = await col.leaderboard().where('country', '==', country).limit(READ_LIMIT).get();
       return ranked(
-        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1 })),
+        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, ...(d.get('team') ? { team: d.get('team') as string } : {}) }) as Row),
         'level',
       );
     });
