@@ -43,5 +43,9 @@ export const limits = {
   /** The cloud save, per player (the game sends it a few seconds after a change). */
   save: make('save', 60_000, 20, byPlayer),
   clientLogs: make('clientLogs', 60_000, 30, byPlayer),
+  /** Team chat messages, per player. */
+  chat: make('chat', 60_000, 12, byPlayer),
+  /** Team and friend actions (create, join, leave, requests), per player. */
+  social: make('social', 60_000, 30, byPlayer),
   admin: make('admin', 60_000, 120),
 };

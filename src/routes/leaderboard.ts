@@ -7,7 +7,9 @@ import { leaderboardService } from '../services/leaderboardService';
 import { dbLog } from '../services/logStore';
 import { playerService } from '../services/playerService';
 import { profileSchema } from '../services/profile';
-import { logBusinessEvent, logSecurityEvent } from '../utils/logger';
+import { socialService } from '../services/socialService';
+import { teamService } from '../services/teamService';
+import { logBusinessEvent, logger, logSecurityEvent } from '../utils/logger';
 
 /**
  * POST /leaderboard/level  { level, name?, avatar?, frame? } -> { level, accepted, rank }
@@ -38,6 +40,13 @@ export function createLeaderboardRouter(): Router {
         dbLog.security('leaderboard_suspect', data);
       }
       if (r.accepted) {
+        // The week's points (levels gained, not a first claim of old levels), the country, the team's score.
+        const gained = r.previous === null ? 0 : r.level - r.previous;
+        // The country: the device's region the game sends ("en-TR"), else the player's saved locale.
+        void (body.locale ? Promise.resolve({ locale: body.locale }) : playerService.get(req.playerId))
+          .then((p) => socialService.onLevel(req.playerId, gained, { name: name!, avatar: avatar!, frame: frame!, level: r.level, locale: p?.locale }))
+          .catch((err) => logger.warn({ err }, 'social: level not counted'));
+        void teamService.onLevel(req.playerId, r.level).catch((err) => logger.warn({ err }, 'team: level not counted'));
         logBusinessEvent('level_reached', { level: r.level, previous: r.previous, claimed: body.level });
         dbLog.event('level_reached', { level: r.level, previous: r.previous, claimed: body.level });
       }

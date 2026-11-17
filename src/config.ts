@@ -96,6 +96,17 @@ export const config = {
     saves: `${env.COLLECTION_PREFIX}saves`,
     invites: `${env.COLLECTION_PREFIX}invites`,
     referrals: `${env.COLLECTION_PREFIX}referrals`,
+    /** Teams (teamService): the team, its members, its chat (a subcollection "messages"). */
+    teams: `${env.COLLECTION_PREFIX}teams`,
+    teamMembers: `${env.COLLECTION_PREFIX}team_members`,
+    /** Lives sent by teammates, waiting for the player to take them. */
+    lifeInbox: `${env.COLLECTION_PREFIX}life_inbox`,
+    /** The weekly race: one row per player per week ({week}_{playerId}). */
+    weekly: `${env.COLLECTION_PREFIX}weekly`,
+    /** Friends and friend requests, one doc per player. */
+    friends: `${env.COLLECTION_PREFIX}friends`,
+    /** Chat messages players reported. */
+    reports: `${env.COLLECTION_PREFIX}reports`,
   },
 
   jwt: {

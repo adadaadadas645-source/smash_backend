@@ -48,6 +48,12 @@ export const col = {
   saves: () => db.collection(config.collections.saves),
   invites: () => db.collection(config.collections.invites),
   referrals: () => db.collection(config.collections.referrals),
+  teams: () => db.collection(config.collections.teams),
+  teamMembers: () => db.collection(config.collections.teamMembers),
+  lifeInbox: () => db.collection(config.collections.lifeInbox),
+  weekly: () => db.collection(config.collections.weekly),
+  friends: () => db.collection(config.collections.friends),
+  reports: () => db.collection(config.collections.reports),
 };
 
 /** A cheap read that proves the credentials and the database work (used by /health/deep). */

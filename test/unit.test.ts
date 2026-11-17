@@ -11,7 +11,9 @@ import { jwsPayload } from '../src/services/appStore';
 import { findProduct } from '../src/services/catalog';
 import { transactionIdOf } from '../src/services/iosPurchaseService';
 import { allowedLevel } from '../src/services/leaderboardService';
+import { cleanMessage, isRude } from '../src/services/chatFilter';
 import { cleanName } from '../src/services/profile';
+import { countryOf, weekOf } from '../src/services/socialService';
 import { parseUnityReceipt, signatureValid } from '../src/services/receipt';
 import { deviceSecretMatches, hashDeviceSecret, issueAccessToken, verifyAccessToken } from '../src/services/tokenService';
 import { safeForLog } from '../src/utils/safeLog';
@@ -178,4 +180,29 @@ test('claimableRewards: tiers at 2, 4, 8, 16 friends who reached the level, each
 test('normalizeCode: upper case, letters and digits only', () => {
   assert.equal(normalizeCode(' ab3-x9k7q '), 'AB3X9K7Q');
   assert.equal(normalizeCode('inv%3D'), 'INV3D');
+});
+
+test('chat: rude words and links are masked, ordinary words kept', () => {
+  assert.equal(cleanMessage('selam orospu cocugu'), 'selam o***** cocugu');
+  assert.equal(cleanMessage('f u c k you FUCKING'), 'f u c k you F******');
+  assert.equal(cleanMessage('bak www.site.com'), 'bak w***********');
+  assert.equal(isRude('malzeme'), false);
+  assert.equal(isRude('şikayet'), false);
+  assert.equal(isRude('mal'), true);
+  assert.equal(cleanMessage('  merhaba   takım <b>  '), 'merhaba takım b');
+  assert.equal([...cleanMessage('a'.repeat(400))].length, 200);
+});
+
+test('weekly race: weeks start on Monday, UTC', () => {
+  assert.deepEqual(weekOf(Date.UTC(2026, 10, 17, 12)), { id: '2026-11-16', endsAt: Date.UTC(2026, 10, 23) });
+  assert.equal(weekOf(Date.UTC(2026, 10, 22, 23, 59)).id, '2026-11-16');
+  assert.equal(weekOf(Date.UTC(2026, 10, 23)).id, '2026-11-23');
+});
+
+test('country: from the locale', () => {
+  assert.equal(countryOf('tr-TR'), 'TR');
+  assert.equal(countryOf('en_US'), 'US');
+  assert.equal(countryOf('tr'), 'TR');
+  assert.equal(countryOf('zz'), null);
+  assert.equal(countryOf(null), null);
 });
