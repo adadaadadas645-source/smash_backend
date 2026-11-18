@@ -29,7 +29,15 @@ export const CREATE_COST = 100;
 export const LIFE_HELPS = 5;
 export const HELP_COINS = 5;
 export const ASK_LIFE_COOLDOWN_MS = 4 * 60 * 60 * 1000;
-export const CREST_COUNT = 20;
+/**
+ * Asking for coins: once every ASK_COINS_COOLDOWN_MS, a "coins" card that up to COIN_HELPS
+ * teammates answer; each answer puts COIN_GIFT coins in the asker's inbox (the game adds them)
+ * and gives the helper HELP_COINS, as a life does.
+ */
+export const COIN_HELPS = 5;
+export const COIN_GIFT = 20;
+export const ASK_COINS_COOLDOWN_MS = 8 * 60 * 60 * 1000;
+export const CREST_COUNT = 48;
 const MESSAGES_KEPT = 60;
 
 export const createSchema = z.object({
@@ -73,7 +81,7 @@ export interface MemberDoc {
 
 export interface MessageOut {
   id: string;
-  kind: 'text' | 'life' | 'join' | 'leave';
+  kind: 'text' | 'life' | 'coins' | 'join' | 'leave';
   playerId: string;
   name: string;
   avatar: string;
@@ -293,8 +301,17 @@ export const teamService = {
       .reverse();
     const me = await col.players().doc(playerId).get();
     const askAt = (me.get('askLifeAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
+    const coinsAt = (me.get('askCoinsAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
     const inbox = await col.lifeInbox().doc(playerId).get();
-    return { teamId: m.teamId, role: m.role, messages: rows, askLifeInMs: Math.max(0, askAt + ASK_LIFE_COOLDOWN_MS - Date.now()), livesWaiting: (inbox.get('lives') as number) ?? 0 };
+    return {
+      teamId: m.teamId,
+      role: m.role,
+      messages: rows,
+      askLifeInMs: Math.max(0, askAt + ASK_LIFE_COOLDOWN_MS - Date.now()),
+      askCoinsInMs: Math.max(0, coinsAt + ASK_COINS_COOLDOWN_MS - Date.now()),
+      livesWaiting: (inbox.get('lives') as number) ?? 0,
+      coinsWaiting: (inbox.get('coins') as number) ?? 0,
+    };
   },
 
   async say(playerId: string, raw: string) {
@@ -325,21 +342,38 @@ export const teamService = {
     });
   },
 
-  /** Answering a teammate's life card: a life into their inbox, the helper's help counted. */
+  async askCoins(playerId: string) {
+    const m = await this.memberOf(playerId);
+    if (!m) throw new AppError(404, 'not_in_team');
+    const p = await profileOf(playerId);
+    const meRef = col.players().doc(playerId);
+    const now = Timestamp.now();
+    await col.players().firestore.runTransaction(async (tx) => {
+      const me = await tx.get(meRef);
+      const askAt = (me.get('askCoinsAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
+      if (askAt + ASK_COINS_COOLDOWN_MS > now.toMillis()) throw new AppError(429, 'ask_coins_cooldown', undefined, { inMs: askAt + ASK_COINS_COOLDOWN_MS - now.toMillis() });
+      tx.update(meRef, { askCoinsAt: now });
+      tx.create(col.teams().doc(m.teamId).collection('messages').doc(), { kind: 'coins', playerId, name: p.name, avatar: p.avatar, frame: p.frame, text: '', helpers: [], createdAt: now });
+    });
+  },
+
+  /** Answering a teammate's life (or coins) card: a life (or COIN_GIFT coins) into their inbox, the helper's help counted. */
   async help(playerId: string, messageId: string) {
     const m = await this.memberOf(playerId);
     if (!m) throw new AppError(404, 'not_in_team');
     const msgRef = col.teams().doc(m.teamId).collection('messages').doc(messageId);
     await col.teams().firestore.runTransaction(async (tx) => {
       const msg = await tx.get(msgRef);
-      if (!msg.exists || msg.get('kind') !== 'life') throw new AppError(404, 'message_not_found');
+      const kind = msg.exists ? (msg.get('kind') as string) : '';
+      if (kind !== 'life' && kind !== 'coins') throw new AppError(404, 'message_not_found');
       const asker = msg.get('playerId') as string;
       const helpers = (msg.get('helpers') as string[]) ?? [];
       if (asker === playerId) throw new AppError(400, 'own_request');
       if (helpers.includes(playerId)) throw new AppError(409, 'already_helped');
-      if (helpers.length >= LIFE_HELPS) throw new AppError(409, 'request_full');
+      if (helpers.length >= (kind === 'coins' ? COIN_HELPS : LIFE_HELPS)) throw new AppError(409, 'request_full');
       tx.update(msgRef, { helpers: FieldValue.arrayUnion(playerId) });
-      tx.set(col.lifeInbox().doc(asker), { lives: FieldValue.increment(1), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      const gift = kind === 'coins' ? { coins: FieldValue.increment(COIN_GIFT) } : { lives: FieldValue.increment(1) };
+      tx.set(col.lifeInbox().doc(asker), { ...gift, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
       tx.update(col.teamMembers().doc(playerId), { helps: FieldValue.increment(1) });
     });
     return { coins: HELP_COINS };
@@ -352,6 +386,17 @@ export const teamService = {
       const snap = await tx.get(ref);
       const n = (snap.get('lives') as number) ?? 0;
       if (n > 0) tx.set(ref, { lives: 0, takenAt: FieldValue.serverTimestamp() }, { merge: true });
+      return n;
+    });
+  },
+
+  /** The coins teammates sent, taken (that part of the inbox emptied); the game adds them. */
+  async takeCoins(playerId: string): Promise<number> {
+    const ref = col.lifeInbox().doc(playerId);
+    return col.lifeInbox().firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const n = (snap.get('coins') as number) ?? 0;
+      if (n > 0) tx.set(ref, { coins: 0, coinsTakenAt: FieldValue.serverTimestamp() }, { merge: true });
       return n;
     });
   },

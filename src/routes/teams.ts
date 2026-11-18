@@ -21,6 +21,9 @@ import { logBusinessEvent } from '../utils/logger';
  * POST /teams/life/ask
  * POST /teams/life/:messageId/help -> { coins }
  * POST /teams/life/take            -> { lives }
+ * POST /teams/coins/ask
+ * POST /teams/coins/:messageId/help -> { coins }  (the helper's; the asker's go to the inbox)
+ * POST /teams/coins/take           -> { coins }
  * POST /teams/report               { messageId, reason }
  */
 const idParam = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/);
@@ -58,6 +61,14 @@ export function createTeamRouter(): Router {
     res.json({ success: true });
   }));
   router.post('/life/take', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, lives: await teamService.takeLives(req.playerId) })));
+  router.post('/coins/ask', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    await teamService.askCoins(req.playerId);
+    res.json({ success: true });
+  }));
+  router.post('/coins/take', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, coins: await teamService.takeCoins(req.playerId) })));
+  router.post('/coins/:messageId/help', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    res.json({ success: true, ...(await teamService.help(req.playerId, idParam.parse(req.params.messageId))) });
+  }));
   router.post('/life/:messageId/help', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     res.json({ success: true, ...(await teamService.help(req.playerId, idParam.parse(req.params.messageId))) });
   }));
