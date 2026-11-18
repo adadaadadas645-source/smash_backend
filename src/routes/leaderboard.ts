@@ -43,10 +43,11 @@ export function createLeaderboardRouter(): Router {
         // The week's points (levels gained, not a first claim of old levels), the country, the team's score.
         const gained = r.previous === null ? 0 : r.level - r.previous;
         // The country: the device's region the game sends ("en-TR"), else the player's saved locale.
+        // A hidden row (suspect claims): its levels count for no one else's board, week or team.
         void (body.locale ? Promise.resolve({ locale: body.locale }) : playerService.get(req.playerId))
-          .then((p) => socialService.onLevel(req.playerId, gained, { name: name!, avatar: avatar!, frame: frame!, level: r.level, locale: p?.locale }))
+          .then((p) => socialService.onLevel(req.playerId, r.hidden ? 0 : gained, { name: name!, avatar: avatar!, frame: frame!, level: r.level, locale: p?.locale }))
           .catch((err) => logger.warn({ err }, 'social: level not counted'));
-        void teamService.onLevel(req.playerId, r.level).catch((err) => logger.warn({ err }, 'team: level not counted'));
+        if (!r.hidden) void teamService.onLevel(req.playerId, r.level).catch((err) => logger.warn({ err }, 'team: level not counted'));
         logBusinessEvent('level_reached', { level: r.level, previous: r.previous, claimed: body.level });
         dbLog.event('level_reached', { level: r.level, previous: r.previous, claimed: body.level });
       }
@@ -57,8 +58,8 @@ export function createLeaderboardRouter(): Router {
   router.get(
     '/world',
     asyncRoute<PlayerRequest>(async (req, res) => {
-      const [top, me, total] = await Promise.all([leaderboardService.top(), leaderboardService.rankOf(req.playerId), leaderboardService.total()]);
-      const rows = top.rows.map(({ playerId, ...row }) => (playerId === req.playerId ? { ...row, me: true } : row));
+      const [top, me, total] = await Promise.all([leaderboardService.topFor(req.playerId), leaderboardService.rankOf(req.playerId), leaderboardService.total()]);
+      const rows = top.rows.map(({ playerId, hidden: _hidden, ...row }) => (playerId === req.playerId ? { ...row, me: true } : row));
       // In the list: its place there is the truth (the count may be a few seconds older).
       const inList = rows.find((r) => r.me);
       res.set('Cache-Control', 'private, max-age=15');

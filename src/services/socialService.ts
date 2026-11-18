@@ -23,7 +23,7 @@ const WEEKLY_CACHE_MS = 30_000;
 const COUNTRY_CACHE_MS = 60_000;
 const READ_LIMIT = 2000;
 
-type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number; team?: string };
+type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number; team?: string; hidden?: boolean };
 
 const weeklyCache = new TtlCache<Row[]>(WEEKLY_CACHE_MS, 4);
 const countryCache = new TtlCache<Row[]>(COUNTRY_CACHE_MS, 50);
@@ -54,11 +54,29 @@ function ranked<T extends { level: number; points?: number }>(rows: T[], by: 'le
 }
 
 async function boardRows(ids: string[]) {
-  if (ids.length === 0) return new Map<string, { name: string; avatar: string; frame: string; level: number; team?: string }>();
+  type BoardRow = { name: string; avatar: string; frame: string; level: number; team?: string; hidden?: boolean };
+  if (ids.length === 0) return new Map<string, BoardRow>();
   const snaps = await col.leaderboard().firestore.getAll(...ids.map((id) => col.leaderboard().doc(id)));
-  const out = new Map<string, { name: string; avatar: string; frame: string; level: number; team?: string }>();
-  for (const s of snaps) if (s.exists) out.set(s.id, { name: s.get('name'), avatar: s.get('avatar'), frame: s.get('frame'), level: s.get('level') ?? 1, ...(s.get('team') ? { team: s.get('team') as string } : {}) });
+  const out = new Map<string, BoardRow>();
+  for (const s of snaps)
+    if (s.exists)
+      out.set(s.id, {
+        name: s.get('name'),
+        avatar: s.get('avatar'),
+        frame: s.get('frame'),
+        level: s.get('level') ?? 1,
+        ...(s.get('team') ? { team: s.get('team') as string } : {}),
+        ...(s.get('hidden') ? { hidden: true } : {}),
+      });
   return out;
+}
+
+/**
+ * A board as `viewer` sees it: the hidden rows (leaderboardService: suspect claims) left out but
+ * the viewer's own, the places counted again, without the hidden mark.
+ */
+export function visibleTo<T extends { rank: number; playerId: string; hidden?: boolean }>(rows: T[], viewer: string): T[] {
+  return rows.filter((r) => !r.hidden || r.playerId === viewer).map(({ hidden: _hidden, ...r }, i) => ({ ...r, rank: i + 1 }) as T);
 }
 
 export const socialService = {
@@ -81,20 +99,24 @@ export const socialService = {
 
   async weekly(playerId: string) {
     const week = weekOf(Date.now());
-    const rows = await weeklyCache.getOrLoad(week.id, async () => {
+    const all = await weeklyCache.getOrLoad(week.id, async () => {
       const snap = await col.weekly().where('week', '==', week.id).limit(READ_LIMIT).get();
       const rows = ranked(
         snap.docs.map((d) => ({ rank: 0, playerId: d.get('playerId'), name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, points: d.get('points') ?? 0 }) as Row),
         'points',
       );
-      // The teams of the first hundred (the list shows them under the names).
-      const board = await boardRows(rows.slice(0, 100).map((r) => r.playerId));
-      for (const r of rows.slice(0, 100)) {
-        const team = board.get(r.playerId)?.team;
-        if (team) r.team = team;
+      // The teams of the first ones (the list shows them under the names), and the hidden ones
+      // among them (left out for the others below).
+      const head = rows.slice(0, 200);
+      const board = await boardRows(head.map((r) => r.playerId));
+      for (const r of head) {
+        const b = board.get(r.playerId);
+        if (b?.team) r.team = b.team;
+        if (b?.hidden) r.hidden = true;
       }
       return rows;
     });
+    const rows = visibleTo(all, playerId);
     const me = rows.find((r) => r.playerId === playerId);
     return { week: week.id, endsInMs: week.endsAt - Date.now(), top: rows.slice(0, 100), me: me ? { rank: me.rank, points: me.points ?? 0 } : null, total: rows.length };
   },
@@ -102,13 +124,14 @@ export const socialService = {
   async country(playerId: string, code: string) {
     const country = String(code || '').toUpperCase().slice(0, 2);
     if (!/^[A-Z]{2}$/.test(country)) throw new AppError(400, 'bad_country');
-    const rows = await countryCache.getOrLoad(country, async () => {
+    const all = await countryCache.getOrLoad(country, async () => {
       const snap = await col.leaderboard().where('country', '==', country).limit(READ_LIMIT).get();
       return ranked(
-        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, ...(d.get('team') ? { team: d.get('team') as string } : {}) }) as Row),
+        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, ...(d.get('team') ? { team: d.get('team') as string } : {}), ...(d.get('hidden') ? { hidden: true } : {}) }) as Row),
         'level',
       );
     });
+    const rows = visibleTo(all, playerId);
     const me = rows.find((r) => r.playerId === playerId);
     return { country, top: rows.slice(0, 100), me: me ? { rank: me.rank, level: me.level } : null, total: rows.length };
   },
@@ -119,7 +142,10 @@ export const socialService = {
     const snap = await col.friends().where('owner', '==', playerId).limit(MAX_FRIENDS * 2).get();
     const links = snap.docs.map((d) => ({ other: d.get('other') as string, status: d.get('status') as 'friend' | 'incoming' | 'outgoing' }));
     const board = await boardRows([...links.map((l) => l.other), playerId]);
-    const row = (id: string) => ({ playerId: id, ...(board.get(id) ?? { name: 'Player', avatar: 'leo', frame: 'gold', level: 1 }) });
+    const row = (id: string) => {
+      const { hidden: _hidden, ...b } = board.get(id) ?? { name: 'Player', avatar: 'leo', frame: 'gold', level: 1 };
+      return { playerId: id, ...b };
+    };
     const friends = ranked([...links.filter((l) => l.status === 'friend').map((l) => row(l.other)), { ...row(playerId), me: true }], 'level');
     return {
       code: await referralService.codeOf(playerId),
@@ -178,9 +204,9 @@ export const socialService = {
 
   /** Players near the top of the board who are not friends yet (the "Suggested" list). */
   async suggested(playerId: string) {
-    const [top, mine] = await Promise.all([leaderboardService.top(), col.friends().where('owner', '==', playerId).limit(MAX_FRIENDS * 2).get()]);
+    const [top, mine] = await Promise.all([leaderboardService.topFor(playerId), col.friends().where('owner', '==', playerId).limit(MAX_FRIENDS * 2).get()]);
     const known = new Set([playerId, ...mine.docs.map((d) => d.get('other') as string)]);
-    const pool = top.rows.filter((r) => !known.has(r.playerId));
+    const pool = top.rows.filter((r) => !known.has(r.playerId) && !r.hidden);
     // A few strong players and a few at random, so the list is not the same for everyone.
     const pick = [...pool.slice(0, 3), ...pool.slice(3).sort(() => Math.random() - 0.5).slice(0, 7)];
     const codes = await Promise.all(pick.map((r) => col.players().doc(r.playerId).get().then((s) => (s.get('inviteCode') as string | undefined) ?? null)));

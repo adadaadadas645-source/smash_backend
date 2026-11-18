@@ -10,10 +10,11 @@ import { test } from 'node:test';
 import { jwsPayload } from '../src/services/appStore';
 import { findProduct } from '../src/services/catalog';
 import { transactionIdOf } from '../src/services/iosPurchaseService';
-import { allowedLevel } from '../src/services/leaderboardService';
+import { allowedLevel, claimSuspect, HIDE_AFTER, MAX_STEP } from '../src/services/leaderboardService';
+import { coinsImpossible } from '../src/services/saveService';
 import { cleanMessage, isRude } from '../src/services/chatFilter';
 import { cleanName } from '../src/services/profile';
-import { countryOf, weekOf } from '../src/services/socialService';
+import { countryOf, visibleTo, weekOf } from '../src/services/socialService';
 import { parseUnityReceipt, signatureValid } from '../src/services/receipt';
 import { deviceSecretMatches, hashDeviceSecret, issueAccessToken, verifyAccessToken } from '../src/services/tokenService';
 import { safeForLog } from '../src/utils/safeLog';
@@ -34,6 +35,45 @@ test('allowedLevel: rises as fast as levels can be played, no faster', () => {
   assert.deepEqual(allowedLevel(50, t0, 51, t0 + 60_000, 5000), { level: 51, clamped: false, first: false });
   assert.deepEqual(allowedLevel(50, t0, 57, t0 + 60_000, 5000), { level: 57, clamped: false, first: false });
   assert.deepEqual(allowedLevel(50, t0, 900, t0 + 60_000, 5000), { level: 57, clamped: true, first: false });
+});
+
+test('allowedLevel: time away does not bank levels (at most MAX_STEP a claim)', () => {
+  const t0 = 1_000_000;
+  // Two hours away: before, 50 -> 533 at once; now 50 + MAX_STEP.
+  assert.deepEqual(allowedLevel(50, t0, 1519, t0 + 2 * 3600_000, 5000), { level: 50 + MAX_STEP, clamped: true, first: false });
+  // A real run played offline (40 levels in two hours) is cut to the step, not refused.
+  assert.equal(allowedLevel(50, t0, 90, t0 + 2 * 3600_000, 5000).level, 50 + MAX_STEP);
+});
+
+test('claimSuspect: far over the ceiling or a high first claim strikes; a little over does not', () => {
+  assert.equal(claimSuspect(1519, { level: 80, first: false }), true);
+  assert.equal(claimSuspect(90, { level: 80, first: false }), false);
+  assert.equal(claimSuspect(80, { level: 80, first: false }), false);
+  assert.equal(claimSuspect(400, { level: 400, first: true }), true);
+  assert.equal(claimSuspect(40, { level: 40, first: true }), false);
+  assert.ok(HIDE_AFTER >= 2);
+});
+
+test('coinsImpossible: an edited save, not a rich one', () => {
+  // "Open Ai": 99,991,630 coins at level 1517, nothing bought.
+  assert.equal(coinsImpossible(99_991_630, 1517, 0), true);
+  // Over the generous line (logged) but not beyond all reason (kept).
+  assert.equal(coinsLookWrong(60_000, 20, 0), true);
+  assert.equal(coinsImpossible(60_000, 20, 0), false);
+  // Coins bought count.
+  assert.equal(coinsImpossible(900_000, 5, 900_000), false);
+});
+
+test('visibleTo: hidden rows left out but the viewer own row, places counted again', () => {
+  const rows = [
+    { rank: 1, playerId: 'a', level: 900 },
+    { rank: 2, playerId: 'cheat', level: 639, hidden: true },
+    { rank: 3, playerId: 'b', level: 500 },
+  ];
+  assert.deepEqual(visibleTo(rows, 'b').map((r) => [r.playerId, r.rank]), [['a', 1], ['b', 2]]);
+  const own = visibleTo(rows, 'cheat');
+  assert.deepEqual(own.map((r) => [r.playerId, r.rank]), [['a', 1], ['cheat', 2], ['b', 3]]);
+  assert.equal('hidden' in own[1], false);
 });
 
 test('cleanName: strips control and bidi marks, keeps 16 characters', () => {

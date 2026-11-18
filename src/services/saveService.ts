@@ -3,6 +3,7 @@ import { col, FieldValue } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { currentContext } from '../utils/context';
 import { logSecurityEvent, logger } from '../utils/logger';
+import { leaderboardService } from './leaderboardService';
 import { dbLog } from './logStore';
 
 /**
@@ -13,8 +14,10 @@ import { dbLog } from './logStore';
  * overwrites a newer one.
  *
  * The coins and the boosters are copied out of the progress key to plain fields, for support
- * and for the check against what was bought (a save far richer than any player could be is
- * logged as suspicious, not refused: the save stays the player's).
+ * and for the check against what was bought. A save richer than any player could be
+ * (coinsLookWrong) is logged; one beyond all reason
+ * (coinsImpossible: an edited save) is refused with 422 `save_rejected` (the game does not send
+ * it again) and hides the row at once.
  */
 
 /** The game's save keys that travel with the account (Backend.cs CloudSave.Keys). */
@@ -80,6 +83,11 @@ export function coinsLookWrong(coins: number, level: number, purchasedCoins: num
   return coins > purchasedCoins + Math.max(1, level) * 600 + 20_000;
 }
 
+/** Coins no play and no purchase could bring: an edited save (ten times over the generous line, and a million at least). */
+export function coinsImpossible(coins: number, level: number, purchasedCoins: number): boolean {
+  return coins > Math.max(1_000_000, (purchasedCoins + Math.max(1, level) * 600 + 20_000) * 10);
+}
+
 export const saveService = {
   async get(playerId: string): Promise<SaveDoc | null> {
     const snap = await col.saves().doc(playerId).get();
@@ -98,6 +106,15 @@ export const saveService = {
     }
     if (total > MAX_TOTAL) throw new AppError(413, 'save_too_large');
     const sum = summarize(keys);
+    const playerDoc = await col.players().doc(playerId).get();
+    const bought = (playerDoc.get('purchasedCoins') as number | undefined) ?? 0;
+    if (coinsImpossible(sum.coins, sum.level, bought)) {
+      const data = { coins: sum.coins, level: sum.level, purchasedCoins: bought, rev: input.rev };
+      logSecurityEvent('save_rejected', { playerId, ...data });
+      dbLog.security('save_rejected', data, playerId);
+      await leaderboardService.flag(playerId, 'save_coins_impossible', true).catch((err) => logger.warn({ err, playerId }, 'save: flag failed'));
+      throw new AppError(422, 'save_rejected');
+    }
     const ref = col.saves().doc(playerId);
     const playerRef = col.players().doc(playerId);
     let purchasedCoins = 0;
