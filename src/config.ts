@@ -103,6 +103,8 @@ export const config = {
     lifeInbox: `${env.COLLECTION_PREFIX}life_inbox`,
     /** The weekly race: one row per player per week ({week}_{playerId}). */
     weekly: `${env.COLLECTION_PREFIX}weekly`,
+    /** A weekly race's prize taken: {week}_{playerId} (one each, never twice). */
+    weeklyPrizes: `${env.COLLECTION_PREFIX}weekly_prizes`,
     /** Friends and friend requests, one doc per player. */
     friends: `${env.COLLECTION_PREFIX}friends`,
     /** Chat messages players reported. */

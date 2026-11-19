@@ -36,6 +36,28 @@ export function weekOf(ms: number): { id: string; endsAt: number } {
   return { id: new Date(monday).toISOString().slice(0, 10), endsAt: monday + 7 * 86400_000 };
 }
 
+/** One prize: coins, a booster ("giant": the big ball), a power ("rocket") or lives; the game hands it over. */
+export type Prize = { kind: 'coins' | 'booster' | 'power' | 'lives'; id?: string; n: number };
+
+const gold = (n: number): Prize => ({ kind: 'coins', n });
+const bigBall = (n: number): Prize => ({ kind: 'booster', id: 'giant', n });
+const rocket = (n: number): Prize => ({ kind: 'power', id: 'rocket', n });
+const lives = (n: number): Prize => ({ kind: 'lives', n });
+
+/** The 1st's, 2nd's and 3rd's prizes, a set a week in turn (WEEKLY_PRIZES[weekIndex % 4]). */
+export const WEEKLY_PRIZES: Prize[][][] = [
+  [[gold(1000), bigBall(2)], [rocket(2), gold(500)], [lives(3)]],
+  [[bigBall(3), rocket(2)], [gold(750)], [rocket(1)]],
+  [[gold(1500), lives(5)], [bigBall(2)], [gold(300)]],
+  [[rocket(3), bigBall(2)], [lives(3), gold(300)], [bigBall(1)]],
+];
+
+/** The week's prizes: by its end (whole weeks since 1970), the same set on every phone and here. */
+export function prizesOf(endsAt: number): Prize[][] {
+  const i = Math.floor(endsAt / (7 * 86400_000)) % WEEKLY_PRIZES.length;
+  return WEEKLY_PRIZES[i];
+}
+
 /** "tr-TR", "tr_TR", "en-US" → "TR", "US"; a language alone → its main country ("tr" → "TR"). */
 export function countryOf(locale: string | null | undefined): string | null {
   if (!locale) return null;
@@ -97,9 +119,10 @@ export const socialService = {
     await Promise.all(writes);
   },
 
-  async weekly(playerId: string) {
-    const week = weekOf(Date.now());
-    const all = await weeklyCache.getOrLoad(week.id, async () => {
+  /** A week's rows, ranked by points, the first ones' teams and hidden marks filled in (cached). */
+  async weekRows(weekId: string): Promise<Row[]> {
+    return weeklyCache.getOrLoad(weekId, async () => {
+      const week = { id: weekId };
       const snap = await col.weekly().where('week', '==', week.id).limit(READ_LIMIT).get();
       const rows = ranked(
         snap.docs.map((d) => ({ rank: 0, playerId: d.get('playerId'), name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, points: d.get('points') ?? 0 }) as Row),
@@ -116,9 +139,49 @@ export const socialService = {
       }
       return rows;
     });
+  },
+
+  async weekly(playerId: string) {
+    const week = weekOf(Date.now());
+    const all = await this.weekRows(week.id);
     const rows = visibleTo(all, playerId);
     const me = rows.find((r) => r.playerId === playerId);
-    return { week: week.id, endsInMs: week.endsAt - Date.now(), top: rows.slice(0, 100), me: me ? { rank: me.rank, points: me.points ?? 0 } : null, total: rows.length };
+    return {
+      week: week.id,
+      endsInMs: week.endsAt - Date.now(),
+      // As objects (Firestore, where the request log keeps the answer, takes no array in an array).
+      prizes: prizesOf(week.endsAt).map((items, i) => ({ place: i + 1, items })),
+      top: rows.slice(0, 100),
+      me: me ? { rank: me.rank, points: me.points ?? 0 } : null,
+      total: rows.length,
+    };
+  },
+
+  /**
+   * Last week's race for the player: their place among everyone (the hidden left out, as the
+   * board showed it), and, in the first three, its prize and whether it was taken.
+   */
+  async lastWeek(playerId: string) {
+    const last = weekOf(Date.now() - 7 * 86400_000);
+    const rows = visibleTo(await this.weekRows(last.id), '');
+    const me = rows.find((r) => r.playerId === playerId);
+    const place = me && (me.points ?? 0) > 0 ? me.rank : 0;
+    const prize = place >= 1 && place <= 3 ? prizesOf(last.endsAt)[place - 1] : null;
+    const taken = prize ? (await col.weeklyPrizes().doc(`${last.id}_${playerId}`).get()).exists : false;
+    return { week: last.id, place, points: me?.points ?? 0, prize, taken };
+  },
+
+  /** Last week's prize taken (once): 409 nothing_to_claim when not in the first three, already_claimed when taken. */
+  async claimLastWeek(playerId: string) {
+    const r = await this.lastWeek(playerId);
+    if (!r.prize) throw new AppError(409, 'nothing_to_claim');
+    const ref = col.weeklyPrizes().doc(`${r.week}_${playerId}`);
+    await col.weeklyPrizes().firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) throw new AppError(409, 'already_claimed');
+      tx.create(ref, { week: r.week, playerId, place: r.place, prize: r.prize, at: FieldValue.serverTimestamp() });
+    });
+    return { week: r.week, place: r.place, prize: r.prize };
   },
 
   async country(playerId: string, code: string) {

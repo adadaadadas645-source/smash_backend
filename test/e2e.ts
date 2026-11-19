@@ -134,11 +134,63 @@ async function main() {
       world.json.top.map((r: any) => r.level),
       [...world.json.top.map((r: any) => r.level)].sort((a: number, b: number) => b - a),
     );
-    assert.equal(world.json.top[0].level, 300);
-    assert.equal(world.json.me.rank, 3);
+    // A new player starting at 300 is an edited game: hidden from the others' board (anti-cheat).
+    assert.ok(!world.json.top.some((r: any) => r.level === 300), 'the fresh 300 is hidden');
+    assert.equal(world.json.top[0].level, 120);
+    assert.equal(world.json.me.rank, 2);
     assert.ok(world.json.top.find((r: any) => r.me));
     assert.ok(!('playerId' in world.json.top[0]), 'player ids are not public');
     ok(`world board: ${world.json.top.map((r: any) => `${r.rank}.${r.name}(${r.level})`).join(' ')}; me #${world.json.me.rank} of ${world.json.total}`);
+
+    // ── Weekly race: last week's first three take their prize, once ──
+    {
+      const DAY = 86400_000;
+      const now = Date.now();
+      const d = new Date(now - 7 * DAY);
+      const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+      const lastWeek = new Date(monday).toISOString().slice(0, 10);
+      const ids: string[] = [];
+      for (const tok of [t1, others[1].token, others[2].token]) ids.push((await call('GET', '/api/v1/players/me', undefined, tok)).json.player.playerId);
+      // Last week's rows straight into the emulator: t1 2nd (30), Rakip120 1st (50), Rakip7 4th (5), one more 3rd (20).
+      const rows: Array<[string, number]> = [[ids[0], 30], [ids[1], 50], [ids[2], 5], ['p_e2e_third', 20]];
+      for (const [pid, points] of rows) {
+        const url = `http://${env.FIRESTORE_EMULATOR_HOST}/v1/projects/demo-kingdom/databases/(default)/documents/${env.COLLECTION_PREFIX}weekly?documentId=${lastWeek}_${pid}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', Authorization: 'Bearer owner' },
+          body: JSON.stringify({ fields: { week: { stringValue: lastWeek }, playerId: { stringValue: pid }, points: { integerValue: String(points) }, name: { stringValue: pid }, avatar: { stringValue: 'leo' }, frame: { stringValue: 'gold' }, level: { integerValue: '10' } } }),
+        });
+        assert.ok(res.ok, `seed ${pid}: ${res.status}`);
+      }
+      const wk = await call('GET', '/api/v1/social/weekly', undefined, t1);
+      assert.equal(wk.status, 200);
+      assert.equal(wk.json.prizes.length, 3, 'this week shows its three prizes');
+      assert.equal(wk.json.prizes[1].place, 2);
+      let last = await call('GET', '/api/v1/social/weekly/last', undefined, t1);
+      assert.equal(last.status, 200, JSON.stringify(last.json));
+      assert.equal(last.json.week, lastWeek);
+      assert.equal(last.json.place, 2);
+      assert.ok(Array.isArray(last.json.prize) && last.json.prize.length >= 1);
+      assert.equal(last.json.taken, false);
+      const claim = await call('POST', '/api/v1/social/weekly/claim', undefined, t1);
+      assert.equal(claim.status, 200, JSON.stringify(claim.json));
+      assert.equal(claim.json.place, 2);
+      assert.deepEqual(claim.json.prize, last.json.prize);
+      const again = await call('POST', '/api/v1/social/weekly/claim', undefined, t1);
+      assert.equal(again.status, 409);
+      assert.equal(again.json.error, 'already_claimed');
+      last = await call('GET', '/api/v1/social/weekly/last', undefined, t1);
+      assert.equal(last.json.taken, true);
+      const fourth = await call('GET', '/api/v1/social/weekly/last', undefined, others[2].token);
+      assert.equal(fourth.json.place, 4);
+      assert.equal(fourth.json.prize, null);
+      const none = await call('POST', '/api/v1/social/weekly/claim', undefined, others[2].token);
+      assert.equal(none.status, 409);
+      assert.equal(none.json.error, 'nothing_to_claim');
+      const first = await call('POST', '/api/v1/social/weekly/claim', undefined, others[1].token);
+      assert.equal(first.json.place, 1);
+      ok(`weekly prizes: last week ${lastWeek}, 2nd took ${JSON.stringify(claim.json.prize)} once (again: 409), 4th: nothing, 1st took theirs`);
+    }
 
     // ── Purchases ──
     const tokA = 'tokA_' + randomBytes(40).toString('hex');

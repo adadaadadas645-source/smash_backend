@@ -14,7 +14,7 @@ import { allowedLevel, claimSuspect, HIDE_AFTER, MAX_STEP } from '../src/service
 import { coinsImpossible } from '../src/services/saveService';
 import { cleanMessage, isRude } from '../src/services/chatFilter';
 import { cleanName } from '../src/services/profile';
-import { countryOf, visibleTo, weekOf } from '../src/services/socialService';
+import { countryOf, prizesOf, visibleTo, WEEKLY_PRIZES, weekOf } from '../src/services/socialService';
 import { parseUnityReceipt, signatureValid } from '../src/services/receipt';
 import { deviceSecretMatches, hashDeviceSecret, issueAccessToken, verifyAccessToken } from '../src/services/tokenService';
 import { safeForLog } from '../src/utils/safeLog';
@@ -245,4 +245,30 @@ test('country: from the locale', () => {
   assert.equal(countryOf('tr'), 'TR');
   assert.equal(countryOf('zz'), null);
   assert.equal(countryOf(null), null);
+});
+
+test('weekly prizes: three places a week, a set in turn, the same all week', () => {
+  for (const set of WEEKLY_PRIZES) {
+    assert.equal(set.length, 3);
+    for (const place of set) assert.ok(place.length >= 1 && place.every((p) => p.n > 0));
+  }
+  const w = weekOf(Date.UTC(2026, 10, 18, 12));
+  assert.equal(w.id, '2026-11-16');
+  // Any moment of the week gives the same set; the next week the next one.
+  assert.deepEqual(prizesOf(weekOf(Date.UTC(2026, 10, 16, 0, 1)).endsAt), prizesOf(w.endsAt));
+  assert.deepEqual(prizesOf(weekOf(Date.UTC(2026, 10, 22, 23, 59)).endsAt), prizesOf(w.endsAt));
+  const next = prizesOf(w.endsAt + 7 * 86400_000);
+  assert.notDeepEqual(next, prizesOf(w.endsAt));
+  // Last week: a week back from any moment of this one.
+  assert.equal(weekOf(Date.UTC(2026, 10, 18, 12) - 7 * 86400_000).id, '2026-11-09');
+});
+
+test('visibleTo with no viewer: the hidden left out of the places (last week\'s first three)', () => {
+  const rows = [
+    { rank: 1, playerId: 'cheat', points: 900, hidden: true },
+    { rank: 2, playerId: 'a', points: 50 },
+    { rank: 3, playerId: 'b', points: 40 },
+    { rank: 4, playerId: 'c', points: 30 },
+  ];
+  assert.deepEqual(visibleTo(rows, '').map((r) => [r.playerId, r.rank]), [['a', 1], ['b', 2], ['c', 3]]);
 });

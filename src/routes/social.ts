@@ -6,7 +6,9 @@ import { limits } from '../middleware/rateLimits';
 import { socialService } from '../services/socialService';
 
 /**
- * GET  /social/weekly               -> { week, endsInMs, top, me, total }
+ * GET  /social/weekly               -> { week, endsInMs, prizes, top, me, total }
+ * GET  /social/weekly/last          -> { week, place, points, prize, taken }   (last week's race; prize in the first three)
+ * POST /social/weekly/claim         -> { week, place, prize }   (once; 409 nothing_to_claim / already_claimed)
  * GET  /social/country/:cc          -> { country, top, me, total }
  * GET  /social/friends              -> { code, friends, incoming, outgoing }
  * GET  /social/friends/suggested    -> { players }
@@ -21,6 +23,8 @@ export function createSocialRouter(): Router {
   router.use(requirePlayer, limits.player);
 
   router.get('/weekly', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.weekly(req.playerId)) })));
+  router.get('/weekly/last', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.lastWeek(req.playerId)) })));
+  router.post('/weekly/claim', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.claimLastWeek(req.playerId)) })));
   router.get('/country/:cc', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.country(req.playerId, String(req.params.cc))) })));
   router.get('/friends', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.friends(req.playerId)) })));
   router.get('/friends/suggested', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, players: await socialService.suggested(req.playerId) })));

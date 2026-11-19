@@ -52,6 +52,7 @@ export const col = {
   teamMembers: () => db.collection(config.collections.teamMembers),
   lifeInbox: () => db.collection(config.collections.lifeInbox),
   weekly: () => db.collection(config.collections.weekly),
+  weeklyPrizes: () => db.collection(config.collections.weeklyPrizes),
   friends: () => db.collection(config.collections.friends),
   reports: () => db.collection(config.collections.reports),
 };
