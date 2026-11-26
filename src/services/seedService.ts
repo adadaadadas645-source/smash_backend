@@ -93,6 +93,8 @@ export const seedService = {
     let teams = 0;
     let members = 0;
     for (const c of COUNTRIES) {
+      // Every name once in a country (two "Sarah Adams" in one team would give it away).
+      const taken = new Set<string>();
       const sizes = sizesFor(c.teams.length);
       c.teams.forEach((name, t) => {
         const teamId = `seed_${c.cc.toLowerCase()}_${t}`;
@@ -106,11 +108,21 @@ export const seedService = {
           const memberId = `${teamId}_m${m}`;
           const level = levelOf(m);
           score += level;
-          const fn = pick(c.first, h(`f${m}`));
-          const ln = pick(c.last, h(`l${m}`));
+          let fn = pick(c.first, h(`f${m}`));
+          let ln = pick(c.last, h(`l${m}`));
           // Some players as "Alex Smith", some as "Alex S." or "Alex23", as people name themselves.
           const style = hash(`${memberId}|style`) % 3;
-          const display = (style === 0 ? `${fn} ${ln}` : style === 1 ? `${fn} ${ln[0]}.` : `${fn}${10 + (hash(`${memberId}|n`) % 90)}`).slice(0, 16);
+          const make = (k: number) =>
+            (style === 0 ? `${fn} ${ln}` : style === 1 ? `${fn} ${ln[0]}.` : `${fn}${10 + ((hash(`${memberId}|n`) + k) % 90)}`).slice(0, 16);
+          let display = make(0);
+          for (let k = 1; taken.has(display.toLocaleLowerCase('tr')) && k < 400; k++) {
+            // Another first and last name (or number) until it is new here.
+            fn = pick(c.first, h(`f${m}`) + k);
+            ln = pick(c.last, h(`l${m}`) + Math.floor(k / c.first.length) + k);
+            display = make(k);
+          }
+          if (taken.has(display.toLocaleLowerCase('tr'))) display = `${fn}${100 + (hash(memberId) % 900)}`.slice(0, 16);
+          taken.add(display.toLocaleLowerCase('tr'));
           const avatar = pick(AVATARS, hash(`${memberId}|av`));
           const frame = pick(FRAMES, hash(`${memberId}|fr`));
           const stats = {
