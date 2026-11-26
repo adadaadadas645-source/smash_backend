@@ -124,6 +124,8 @@ export const leaderboardService = {
         const update: Record<string, unknown> = {
           playerId,
           name: profile.name,
+          // For finding a player by name (Friends → Add Friend).
+          nameLower: profile.name.toLocaleLowerCase('tr'),
           avatar: profile.avatar,
           frame: profile.frame,
           level: decision.level,

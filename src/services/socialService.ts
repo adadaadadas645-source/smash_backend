@@ -222,10 +222,17 @@ export const socialService = {
   },
 
   /** A friend request by their ID (invite code); one already asking me is accepted instead. */
-  async request(playerId: string, rawCode: string): Promise<{ status: 'outgoing' | 'friend' }> {
-    const code = normalizeCode(rawCode);
-    const invite = code ? await col.invites().doc(code).get() : null;
-    const other = invite?.exists ? (invite.get('playerId') as string) : null;
+  async request(playerId: string, rawCode: string, byId?: string): Promise<{ status: 'outgoing' | 'friend' }> {
+    let other: string | null = null;
+    if (byId) {
+      // A player found by name: their id (they must exist).
+      const p = await col.players().doc(byId).get();
+      other = p.exists ? byId : null;
+    } else {
+      const code = normalizeCode(rawCode);
+      const invite = code ? await col.invites().doc(code).get() : null;
+      other = invite?.exists ? (invite.get('playerId') as string) : null;
+    }
     if (!other) throw new AppError(404, 'player_not_found');
     if (other === playerId) throw new AppError(400, 'own_id');
     const mineRef = col.friends().doc(`${playerId}__${other}`);

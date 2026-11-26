@@ -29,8 +29,9 @@ export function createSocialRouter(): Router {
   router.get('/friends', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.friends(req.playerId)) })));
   router.get('/friends/suggested', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, players: await socialService.suggested(req.playerId) })));
   router.post('/friends/request', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
-    const body = z.object({ code: z.string().min(1).max(20) }).parse(req.body);
-    res.json({ success: true, ...(await socialService.request(req.playerId, body.code)) });
+    // By their ID (code), or by their player id (a player found by name).
+    const body = z.object({ code: z.string().max(20).optional(), playerId: playerId.optional() }).refine((b) => !!b.code || !!b.playerId).parse(req.body);
+    res.json({ success: true, ...(await socialService.request(req.playerId, body.code ?? '', body.playerId)) });
   }));
   router.post('/friends/answer', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     const body = z.object({ playerId, accept: z.boolean() }).parse(req.body);
