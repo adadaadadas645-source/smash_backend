@@ -8,6 +8,7 @@ import { leaderboardService } from '../services/leaderboardService';
 import { dbLog } from '../services/logStore';
 import { playerService } from '../services/playerService';
 import { hashToken } from '../services/purchaseService';
+import { seedService } from '../services/seedService';
 import { logBusinessEvent } from '../utils/logger';
 import { safeForLog } from '../utils/safeLog';
 
@@ -19,6 +20,9 @@ import { safeForLog } from '../utils/safeLog';
  * GET  /admin/purchases?token=…          … or by its purchase token
  * GET  /admin/logs?playerId=&requestId=&kind=&name=&limit=   log rows, newest first
  * POST /admin/players/:playerId/ban      { banned: true, reason }  (also takes them off the board)
+ * POST   /admin/seed/teams               the sample teams for launch (services/seedService.ts; the same each time)
+ * DELETE /admin/seed/teams               … all taken away again
+ * POST   /admin/backfill/names           the name search's lowercase name on older leaderboard rows
  */
 const plain = (d: FirebaseFirestore.DocumentSnapshot) => ({ id: d.id, ...(safeForLog(d.data()) as object) });
 
@@ -101,6 +105,14 @@ export function createAdminRouter(): Router {
       res.json({ success: true, playerId: id, banned: body.banned });
     }),
   );
+
+  router.post('/seed/teams', asyncRoute(async (_req, res) => {
+    const r = await seedService.plant();
+    logBusinessEvent('seed_teams', r);
+    res.json({ success: true, ...r });
+  }));
+  router.delete('/seed/teams', asyncRoute(async (_req, res) => res.json({ success: true, ...(await seedService.remove()) })));
+  router.post('/backfill/names', asyncRoute(async (_req, res) => res.json({ success: true, ...(await seedService.backfillNames()) })));
 
   return router;
 }
