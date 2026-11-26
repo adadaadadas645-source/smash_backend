@@ -224,6 +224,12 @@ export const socialService = {
   /** A friend request by their ID (invite code); one already asking me is accepted instead. */
   async request(playerId: string, rawCode: string, byId?: string): Promise<{ status: 'outgoing' | 'friend' }> {
     let other: string | null = null;
+    if (byId?.startsWith('seed_')) {
+      // A launch sample player (seedService): the request goes out as to anyone, and stays waiting.
+      const row = await col.leaderboard().doc(byId).get();
+      if (!row.exists || !row.get('seed')) throw new AppError(404, 'player_not_found');
+      return { status: 'outgoing' };
+    }
     if (byId) {
       // A player found by name: their id (they must exist).
       const p = await col.players().doc(byId).get();

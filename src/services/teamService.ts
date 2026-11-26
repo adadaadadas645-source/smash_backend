@@ -180,7 +180,8 @@ export const teamService = {
     const rows = members.docs
       .map((d) => {
         const m = d.data() as MemberDoc;
-        const stats = statsOf.get(d.id);
+        // A sample team's member (seedService) has no board row: their numbers are on the member.
+        const stats = statsOf.get(d.id) ?? ((m as MemberDoc & { stats?: Stats }).stats);
         return { playerId: d.id, name: m.name, avatar: m.avatar, frame: m.frame, role: m.role, level: m.level, helps: m.helps ?? 0, ...(stats ? { stats } : {}) };
       })
       .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || b.level - a.level);

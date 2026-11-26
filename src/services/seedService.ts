@@ -2,6 +2,7 @@ import { col, db, Timestamp } from '../firebase';
 import { AVATARS, FRAMES } from './profile';
 import { hash } from './tournamentRules';
 import { CREST_COUNT, MAX_MEMBERS } from './teamService';
+import { leaderboardService } from './leaderboardService';
 
 /**
  * Sample teams for launch, so the team boards are not empty: per country a set of teams with
@@ -9,8 +10,10 @@ import { CREST_COUNT, MAX_MEMBERS } from './teamService';
  * at ordinary levels. Every document is marked `seed: true` (ids seed_…), the same each time it
  * runs (deterministic), and all of it goes with `remove()`.
  *
- * Members are team members only (kingdom_team_members): no player, no leaderboard row, so the
- * player boards stay real players.
+ * Each member is a team member (kingdom_team_members) and a row on the player boards
+ * (kingdom_leaderboard, with the team's country), so someone looking a team's player up finds them
+ * on the world and the country board. No player document: nothing that signs in or plays. Real
+ * players' documents are never written; remove() takes only what is marked seed.
  */
 type CountrySpec = { cc: string; teams: string[]; first: string[]; last: string[]; descriptions: string[] };
 
@@ -108,6 +111,21 @@ export const seedService = {
           // Some players as "Alex Smith", some as "Alex S." or "Alex23", as people name themselves.
           const style = hash(`${memberId}|style`) % 3;
           const display = (style === 0 ? `${fn} ${ln}` : style === 1 ? `${fn} ${ln[0]}.` : `${fn}${10 + (hash(`${memberId}|n`) % 90)}`).slice(0, 16);
+          const avatar = pick(AVATARS, hash(`${memberId}|av`));
+          const frame = pick(FRAMES, hash(`${memberId}|fr`));
+          const stats = {
+            firstTry: Math.round(level * (0.25 + (hash(`${memberId}|ft`) % 30) / 100)),
+            bestStreak: 3 + (hash(`${memberId}|bs`) % Math.max(4, Math.round(level / 12))),
+            eventWins: hash(`${memberId}|ev`) % Math.max(2, Math.round(level / 40)),
+          };
+          const reachedAt = Timestamp.fromMillis(now - (hash(`${memberId}|reach`) % (3 * 86400)) * 1000);
+          writes.push({
+            ref: col.leaderboard().doc(memberId),
+            data: {
+              playerId: memberId, name: display, nameLower: display.toLocaleLowerCase('tr'), avatar, frame, level, stats,
+              team: name, country: c.cc, levelReachedAt: reachedAt, updatedAt: reachedAt, seed: true,
+            },
+          });
           writes.push({
             ref: col.teamMembers().doc(memberId),
             data: {
@@ -115,9 +133,11 @@ export const seedService = {
               role: m === 0 ? 'leader' : m <= 2 && size > 6 ? 'coleader' : 'knight',
               level,
               helps: hash(`${memberId}|helps`) % 40,
+              // First-try wins, longest streak, event wins: about what a player at that level has.
+              stats,
               name: display,
-              avatar: pick(AVATARS, hash(`${memberId}|av`)),
-              frame: pick(FRAMES, hash(`${memberId}|fr`)),
+              avatar,
+              frame,
               joinedAt: Timestamp.fromMillis(now - (hash(`${memberId}|age`) % (60 * 86400)) * 1000),
               seed: true,
             },
@@ -153,19 +173,26 @@ export const seedService = {
       for (const w of writes.slice(i, i + 450)) batch.set(w.ref, w.data);
       await batch.commit();
     }
+    leaderboardService.forgetCaches();
     return { countries: COUNTRIES.length, teams, members };
   },
 
   /** Takes every sample team and member away (only those marked seed). */
-  async remove(): Promise<{ teams: number; members: number }> {
-    const [t, m] = await Promise.all([col.teams().where('seed', '==', true).get(), col.teamMembers().where('seed', '==', true).get()]);
-    const refs = [...t.docs, ...m.docs].map((d) => d.ref);
+  async remove(): Promise<{ teams: number; members: number; boardRows: number }> {
+    const [t, m, b] = await Promise.all([
+      col.teams().where('seed', '==', true).get(),
+      col.teamMembers().where('seed', '==', true).get(),
+      col.leaderboard().where('seed', '==', true).get(),
+    ]);
+    // Only ids made here (seed_…): a real player's document is never in it, whatever it holds.
+    const refs = [...t.docs, ...m.docs, ...b.docs].filter((d) => d.id.startsWith('seed_')).map((d) => d.ref);
     for (let i = 0; i < refs.length; i += 450) {
       const batch = db.batch();
       for (const r of refs.slice(i, i + 450)) batch.delete(r);
       await batch.commit();
     }
-    return { teams: t.size, members: m.size };
+    leaderboardService.forgetCaches();
+    return { teams: t.size, members: m.size, boardRows: b.size };
   },
 
   /** The name search's lowercase name on every leaderboard row that lacks it (rows from before it came). */
