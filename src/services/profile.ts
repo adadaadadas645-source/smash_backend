@@ -19,11 +19,17 @@ export function cleanName(raw: unknown): string {
   return s;
 }
 
+const count = z.number().int().min(0).max(10_000_000);
+export const statsSchema = z.object({ firstTry: count, bestStreak: count, eventWins: count });
+export type Stats = z.infer<typeof statsSchema>;
+
 export const profileSchema = z.object({
   name: z.string().max(64).optional().transform((v) => (v === undefined ? undefined : cleanName(v))),
   avatar: z.enum(AVATARS).optional().catch(undefined),
   frame: z.enum(FRAMES).optional().catch(undefined),
   locale: z.string().max(10).regex(/^[A-Za-z-]+$/).optional().catch(undefined),
+  /** The profile's numbers (the game's Profile screen), shown on the player's card to others. */
+  stats: statsSchema.optional().catch(undefined),
 });
 
 export type ProfileInput = z.infer<typeof profileSchema>;

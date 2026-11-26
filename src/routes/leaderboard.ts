@@ -33,7 +33,7 @@ export function createLeaderboardRouter(): Router {
         avatar ??= (p?.avatar as typeof avatar) ?? 'leo';
         frame ??= (p?.frame as typeof frame) ?? 'gold';
       }
-      const r = await leaderboardService.submit(req.playerId, body.level, { name, avatar: avatar!, frame: frame! });
+      const r = await leaderboardService.submit(req.playerId, body.level, { name, avatar: avatar!, frame: frame! }, body.stats);
       if (r.clamped || (r.first && r.level >= 150)) {
         const data = { claimed: body.level, granted: r.level, previous: r.previous, first: r.first };
         logSecurityEvent('leaderboard_suspect', data);

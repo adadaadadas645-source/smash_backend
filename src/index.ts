@@ -14,6 +14,7 @@ import { createClientLogRouter } from './routes/clientLogs';
 import { createLeaderboardRouter } from './routes/leaderboard';
 import { createReferralRouter } from './routes/referrals';
 import { createSocialRouter } from './routes/social';
+import { createTournamentRouter } from './routes/tournament';
 import { createTeamRouter } from './routes/teams';
 import { createPlayerRouter } from './routes/players';
 import { createIosPurchaseRouter } from './routes/iosPurchases';
@@ -70,6 +71,7 @@ export function createApp(): express.Express {
   mount(`${API}/referrals`, createReferralRouter(), 'referrals');
   mount(`${API}/teams`, createTeamRouter(), 'teams');
   mount(`${API}/social`, createSocialRouter(), 'social');
+  mount(`${API}/tournament`, createTournamentRouter(), 'tournament');
   mount(`${API}/admin`, createAdminRouter(), 'admin');
   // The account deletion page (Google Play's "Delete account URL"): https://<host>/account/delete
   mount('/account', createAccountPageRouter(), 'accountPage');

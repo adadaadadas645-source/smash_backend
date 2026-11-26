@@ -1,3 +1,4 @@
+import { Stats } from './profile';
 import { col, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { TtlCache } from '../utils/ttlCache';
@@ -23,7 +24,7 @@ const WEEKLY_CACHE_MS = 30_000;
 const COUNTRY_CACHE_MS = 60_000;
 const READ_LIMIT = 2000;
 
-type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number; team?: string; hidden?: boolean };
+type Row = { rank: number; playerId: string; name: string; avatar: string; frame: string; level: number; points?: number; team?: string; hidden?: boolean; stats?: Stats };
 
 const weeklyCache = new TtlCache<Row[]>(WEEKLY_CACHE_MS, 4);
 const countryCache = new TtlCache<Row[]>(COUNTRY_CACHE_MS, 50);
@@ -76,7 +77,7 @@ function ranked<T extends { level: number; points?: number }>(rows: T[], by: 'le
 }
 
 async function boardRows(ids: string[]) {
-  type BoardRow = { name: string; avatar: string; frame: string; level: number; team?: string; hidden?: boolean };
+  type BoardRow = { name: string; avatar: string; frame: string; level: number; team?: string; hidden?: boolean; stats?: Stats };
   if (ids.length === 0) return new Map<string, BoardRow>();
   const snaps = await col.leaderboard().firestore.getAll(...ids.map((id) => col.leaderboard().doc(id)));
   const out = new Map<string, BoardRow>();
@@ -89,6 +90,7 @@ async function boardRows(ids: string[]) {
         level: s.get('level') ?? 1,
         ...(s.get('team') ? { team: s.get('team') as string } : {}),
         ...(s.get('hidden') ? { hidden: true } : {}),
+        ...(s.get('stats') ? { stats: s.get('stats') as Stats } : {}),
       });
   return out;
 }
@@ -136,6 +138,7 @@ export const socialService = {
         const b = board.get(r.playerId);
         if (b?.team) r.team = b.team;
         if (b?.hidden) r.hidden = true;
+        if (b?.stats) r.stats = b.stats;
       }
       return rows;
     });
@@ -190,7 +193,7 @@ export const socialService = {
     const all = await countryCache.getOrLoad(country, async () => {
       const snap = await col.leaderboard().where('country', '==', country).limit(READ_LIMIT).get();
       return ranked(
-        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, ...(d.get('team') ? { team: d.get('team') as string } : {}), ...(d.get('hidden') ? { hidden: true } : {}) }) as Row),
+        snap.docs.map((d) => ({ rank: 0, playerId: d.id, name: d.get('name'), avatar: d.get('avatar'), frame: d.get('frame'), level: d.get('level') ?? 1, ...(d.get('team') ? { team: d.get('team') as string } : {}), ...(d.get('hidden') ? { hidden: true } : {}), ...(d.get('stats') ? { stats: d.get('stats') as Stats } : {}) }) as Row),
         'level',
       );
     });

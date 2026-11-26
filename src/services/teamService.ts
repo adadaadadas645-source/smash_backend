@@ -3,7 +3,7 @@ import { col, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { TtlCache } from '../utils/ttlCache';
 import { cleanMessage } from './chatFilter';
-import { cleanName } from './profile';
+import { cleanName, Stats } from './profile';
 import { playerService } from './playerService';
 
 /**
@@ -174,10 +174,14 @@ export const teamService = {
     const snap = await col.teams().doc(teamId).get();
     if (!snap.exists) throw new AppError(404, 'team_not_found');
     const members = await col.teamMembers().where('teamId', '==', teamId).limit(MAX_MEMBERS).get();
+    // Their profile's numbers (the leaderboard rows), for their card.
+    const board = members.empty ? [] : await col.leaderboard().firestore.getAll(...members.docs.map((d) => col.leaderboard().doc(d.id)));
+    const statsOf = new Map(board.filter((b) => b.exists && b.get('stats')).map((b) => [b.id, b.get('stats') as Stats]));
     const rows = members.docs
       .map((d) => {
         const m = d.data() as MemberDoc;
-        return { playerId: d.id, name: m.name, avatar: m.avatar, frame: m.frame, role: m.role, level: m.level, helps: m.helps ?? 0 };
+        const stats = statsOf.get(d.id);
+        return { playerId: d.id, name: m.name, avatar: m.avatar, frame: m.frame, role: m.role, level: m.level, helps: m.helps ?? 0, ...(stats ? { stats } : {}) };
       })
       .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || b.level - a.level);
     return { team: teamOut(snap.id, snap.data() as TeamDoc), members: rows };
@@ -425,6 +429,7 @@ export const teamService = {
     const m = snap.data() as MemberDoc;
     const delta = level - (m.level ?? 0);
     if (delta <= 0) return;
-    await Promise.all([ref.update({ level }), col.teams().doc(m.teamId).update({ score: FieldValue.increment(delta) })]);
+    // A member playing keeps the team active (its Activity: high within a day of a level won).
+    await Promise.all([ref.update({ level }), col.teams().doc(m.teamId).update({ score: FieldValue.increment(delta), activeAt: Timestamp.now() })]);
   },
 };

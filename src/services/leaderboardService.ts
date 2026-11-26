@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { Stats } from './profile';
 import { col, FieldValue, Timestamp } from '../firebase';
 import { TtlCache } from '../utils/ttlCache';
 import { logger } from '../utils/logger';
@@ -48,6 +49,8 @@ export interface BoardRowOut {
   level: number;
   /** The player's team, when in one. */
   team?: string;
+  /** The profile's numbers, for the player's card. */
+  stats?: Stats;
   me?: boolean;
   /** Left out of the others' boards (never sent: topFor drops it). */
   hidden?: boolean;
@@ -96,7 +99,7 @@ export interface SubmitResult {
 }
 
 export const leaderboardService = {
-  async submit(playerId: string, claimed: number, profile: { name: string; avatar: string; frame: string }): Promise<SubmitResult> {
+  async submit(playerId: string, claimed: number, profile: { name: string; avatar: string; frame: string }, stats?: Stats): Promise<SubmitResult> {
     const ref = col.leaderboard().doc(playerId);
     const result = await col.leaderboard().firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -104,7 +107,9 @@ export const leaderboardService = {
       const now = Date.now();
       const decision = allowedLevel(prev?.level ?? null, prev?.levelReachedAt?.toMillis() ?? null, claimed, now, config.leaderboard.maxLevel);
       const rises = !prev || decision.level > prev.level;
-      const profileChanged = !prev || prev.name !== profile.name || prev.avatar !== profile.avatar || prev.frame !== profile.frame;
+      const prevStats = (prev as { stats?: Stats } | null)?.stats;
+      const statsChanged = !!stats && (!prevStats || prevStats.firstTry !== stats.firstTry || prevStats.bestStreak !== stats.bestStreak || prevStats.eventWins !== stats.eventWins);
+      const profileChanged = !prev || prev.name !== profile.name || prev.avatar !== profile.avatar || prev.frame !== profile.frame || statsChanged;
       // suspectCount (any cut claim, kept for support) is not what hides: strikes are (counted
       // from this rule on, so rows marked under the older, looser one are not hidden by it).
       const suspicious = decision.clamped || (decision.first && decision.level >= FIRST_CLAIM_FLAG);
@@ -125,6 +130,7 @@ export const leaderboardService = {
           updatedAt: Timestamp.fromMillis(now),
         };
         if (rises) update.levelReachedAt = Timestamp.fromMillis(now);
+        if (stats) update.stats = stats;
         if (suspicious) {
           update.suspectCount = FieldValue.increment(1);
           update.lastSuspectAt = Timestamp.fromMillis(now);
@@ -195,11 +201,11 @@ export const leaderboardService = {
         .orderBy('levelReachedAt', 'asc')
         // A few over the limit: the hidden ones are left out per viewer (topFor).
         .limit(config.leaderboard.topLimit + 50)
-        .select('name', 'avatar', 'frame', 'level', 'team', 'hidden')
+        .select('name', 'avatar', 'frame', 'level', 'team', 'hidden', 'stats')
         .get();
       const rows = snap.docs.map((d, i) => {
-        const x = d.data() as Pick<BoardEntry, 'name' | 'avatar' | 'frame' | 'level' | 'hidden'> & { team?: string };
-        return { rank: i + 1, playerId: d.id, name: x.name, avatar: x.avatar, frame: x.frame, level: x.level, ...(x.team ? { team: x.team } : {}), ...(x.hidden ? { hidden: true } : {}) };
+        const x = d.data() as Pick<BoardEntry, 'name' | 'avatar' | 'frame' | 'level' | 'hidden'> & { team?: string; stats?: Stats };
+        return { rank: i + 1, playerId: d.id, name: x.name, avatar: x.avatar, frame: x.frame, level: x.level, ...(x.team ? { team: x.team } : {}), ...(x.hidden ? { hidden: true } : {}), ...(x.stats ? { stats: x.stats } : {}) };
       });
       return { rows, at: new Date().toISOString() };
     });
