@@ -135,6 +135,7 @@ export const playerService = {
     if (Object.keys(update).length === 0) return;
     update.profileUpdatedAt = FieldValue.serverTimestamp();
     await col.players().doc(playerId).update(update);
+    await syncBoardFace(playerId, update);
   },
 
   async setBanned(playerId: string, banned: boolean, reason: string | null): Promise<void> {
@@ -144,6 +145,23 @@ export const playerService = {
 };
 
 /** What the game may know about its own player. */
+/**
+ * The player's row on the boards (kingdom_leaderboard) takes a new name, avatar or frame at once:
+ * the name search (/dm/search) and the boards read it, and it would otherwise wait for the next
+ * level won. Only a row that is there (a player who never reached the board has none).
+ */
+export async function syncBoardFace(playerId: string, face: { name?: unknown; avatar?: unknown; frame?: unknown }): Promise<void> {
+  const row: Record<string, unknown> = {};
+  if (typeof face.name === 'string') {
+    row.name = face.name;
+    row.nameLower = face.name.toLocaleLowerCase('tr');
+  }
+  if (typeof face.avatar === 'string') row.avatar = face.avatar;
+  if (typeof face.frame === 'string') row.frame = face.frame;
+  if (Object.keys(row).length === 0) return;
+  await col.leaderboard().doc(playerId).update(row).catch(() => undefined);
+}
+
 export function publicPlayer(doc: PlayerDoc) {
   return {
     playerId: doc.playerId,

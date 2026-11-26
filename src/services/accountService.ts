@@ -7,7 +7,7 @@ import { currentContext } from '../utils/context';
 import { logBusinessEvent, logSecurityEvent, logger } from '../utils/logger';
 import { leaderboardService } from './leaderboardService';
 import { dbLog } from './logStore';
-import { PlayerDoc, playerService } from './playerService';
+import { PlayerDoc, playerService, syncBoardFace } from './playerService';
 import { hashDeviceSecret } from './tokenService';
 
 const scrypt = promisify(scryptCb) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
@@ -76,6 +76,8 @@ export const accountService = {
       tx.create(nameRef, { playerId, username, createdAt: FieldValue.serverTimestamp() });
       tx.update(playerRef, { username, usernameKey: key, name: username, passwordHash, gen: player.get('gen') ?? 0, accountAt: FieldValue.serverTimestamp() });
     });
+    // The name is now the username: on the boards and in the name search at once.
+    await syncBoardFace(playerId, { name: username });
     logBusinessEvent('account_created', { playerId, username });
     dbLog.event('account_created', { username }, playerId);
     const doc = await playerService.get(playerId);

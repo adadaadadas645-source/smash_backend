@@ -207,7 +207,7 @@ export const seedService = {
     return { teams: t.size, members: m.size, boardRows: b.size };
   },
 
-  /** The name search's lowercase name on every leaderboard row that lacks it (rows from before it came). */
+  /** Every leaderboard row's name as the player has it now, and its lowercase for the name search. */
   async backfillNames(): Promise<{ updated: number }> {
     let updated = 0;
     let last: FirebaseFirestore.QueryDocumentSnapshot | undefined;
@@ -218,10 +218,14 @@ export const seedService = {
       if (snap.empty) break;
       const batch = db.batch();
       let n = 0;
+      // The player's own name now (a name changed, or an account made, after their last level).
+      const real = snap.docs.filter((d) => !d.id.startsWith('seed_'));
+      const players = real.length ? await db.getAll(...real.map((d) => col.players().doc(d.id))) : [];
+      const nameNow = new Map(players.filter((p) => p.exists && typeof p.get('name') === 'string').map((p) => [p.id, p.get('name') as string]));
       for (const d of snap.docs) {
-        const name = d.get('name') as string | undefined;
-        if (name && d.get('nameLower') !== name.toLocaleLowerCase('tr')) {
-          batch.update(d.ref, { nameLower: name.toLocaleLowerCase('tr') });
+        const name = nameNow.get(d.id) ?? (d.get('name') as string | undefined);
+        if (name && (d.get('name') !== name || d.get('nameLower') !== name.toLocaleLowerCase('tr'))) {
+          batch.update(d.ref, { name, nameLower: name.toLocaleLowerCase('tr') });
           n++;
         }
       }
