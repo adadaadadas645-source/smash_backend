@@ -38,6 +38,12 @@ async function face(playerId: string) {
   return { name: (p.get('name') as string) ?? 'Player', avatar: (p.get('avatar') as string) ?? 'leo', frame: (p.get('frame') as string) ?? 'gold', level: (p.get('level') as number) ?? 1, team: null, stats: null };
 }
 
+/** Words and asks only between friends (both sides' rows say `friend`). */
+async function friendsOnly(me: string, other: string) {
+  const link = await col.friends().doc(`${me}__${other}`).get();
+  if (!link.exists || link.get('status') !== 'friend') throw new AppError(403, 'not_friends');
+}
+
 async function exists(playerId: string) {
   const p = await col.players().doc(playerId).get();
   if (!p.exists) throw new AppError(404, 'player_not_found');
@@ -91,10 +97,12 @@ export const directMessageService = {
     if (!text) throw new AppError(400, 'empty_message');
     if (isRude(text)) throw new AppError(400, 'message_rude');
     await exists(other);
+    await friendsOnly(me, other);
     const ref = threads().doc(pairOf(me, other));
     const [a, b] = me < other ? [me, other] : [other, me];
     await Promise.all([
-      ref.set({ a, b, updatedAt: Timestamp.now() }, { merge: true }),
+      // The last word on the thread (who, what, when): the other's inbox (a word that they wrote).
+      ref.set({ a, b, updatedAt: Timestamp.now(), lastFrom: me, lastText: text, lastAt: Date.now() }, { merge: true }),
       ref.collection('messages').add({ from: me, kind: 'text', text, at: Timestamp.now(), helped: false }),
     ]);
     return { ok: true };
@@ -104,6 +112,7 @@ export const directMessageService = {
   async ask(me: string, other: string, kind: 'life' | 'coins') {
     if (other === me) throw new AppError(400, 'own_id');
     await exists(other);
+    await friendsOnly(me, other);
     const ref = threads().doc(pairOf(me, other));
     const field = kind === 'life' ? 'askLifeAt' : 'askCoinsAt';
     const [a, b] = me < other ? [me, other] : [other, me];
@@ -111,7 +120,7 @@ export const directMessageService = {
       const t = await tx.get(ref);
       const last = (t.get(field)?.[me] as number) ?? 0;
       if (Date.now() - last < DM_ASK_MS) throw new AppError(429, 'ask_too_soon');
-      tx.set(ref, { a, b, updatedAt: Timestamp.now(), [field]: { [me]: Date.now() } }, { merge: true });
+      tx.set(ref, { a, b, updatedAt: Timestamp.now(), [field]: { [me]: Date.now() }, lastFrom: me, lastText: kind === 'life' ? 'asked for a life' : 'asked for coins', lastAt: Date.now() }, { merge: true });
       tx.create(ref.collection('messages').doc(), { from: me, kind, text: '', at: Timestamp.now(), helped: false });
     });
     return { ok: true };
@@ -145,6 +154,34 @@ export const directMessageService = {
       if (lives > 0 || coins > 0) tx.set(ref, { lives: { [me]: 0 }, coins: { [me]: 0 } }, { merge: true });
       return { lives, coins };
     });
+  },
+
+  /**
+   * What came for the player since `since` (ms), for the game's banners: friend requests and
+   * words from other players (the newest word of each conversation they wrote last).
+   */
+  async inbox(me: string, since: number) {
+    const after = Number.isFinite(since) && since > 0 ? since : Date.now() - 24 * 3600_000;
+    const [asA, asB, reqs] = await Promise.all([
+      threads().where('a', '==', me).limit(200).get(),
+      threads().where('b', '==', me).limit(200).get(),
+      col.friends().where('owner', '==', me).where('status', '==', 'incoming').limit(50).get(),
+    ]);
+    const words = [...asA.docs, ...asB.docs]
+      .filter((t) => t.get('lastFrom') && t.get('lastFrom') !== me && ((t.get('lastAt') as number) ?? 0) > after)
+      .map((t) => ({ playerId: t.get('lastFrom') as string, text: (t.get('lastText') as string) ?? '', at: t.get('lastAt') as number }));
+    const requests = reqs.docs
+      .map((d) => ({ playerId: d.get('other') as string, at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
+      .filter((r) => r.at > after);
+    // Their names (the board's row, else the player's own).
+    const ids = [...new Set([...words.map((w) => w.playerId), ...requests.map((r) => r.playerId)])];
+    const names = new Map<string, string>();
+    await Promise.all(ids.map(async (id) => names.set(id, (await face(id).catch(() => null))?.name ?? 'A player')));
+    return {
+      now: Date.now(),
+      requests: requests.map((r) => ({ ...r, name: names.get(r.playerId) })),
+      messages: words.sort((x, y) => x.at - y.at).map((w) => ({ ...w, name: names.get(w.playerId) })),
+    };
   },
 
   /** The player's own ID (to show on Add Friend). */
