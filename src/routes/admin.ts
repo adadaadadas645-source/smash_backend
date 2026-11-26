@@ -22,6 +22,8 @@ import { safeForLog } from '../utils/safeLog';
  * POST /admin/players/:playerId/ban      { banned: true, reason }  (also takes them off the board)
  * POST   /admin/seed/teams               the sample teams for launch (services/seedService.ts; the same each time)
  * DELETE /admin/seed/teams               … all taken away again
+ * GET    /admin/players/by-name?name=Polat   players with that name: id, level, hidden or not
+ * POST   /admin/players/:playerId/unhide       a hidden board row shown again (strikes cleared)
  * POST   /admin/backfill/names           the name search's lowercase name on older leaderboard rows
  */
 const plain = (d: FirebaseFirestore.DocumentSnapshot) => ({ id: d.id, ...(safeForLog(d.data()) as object) });
@@ -29,6 +31,45 @@ const plain = (d: FirebaseFirestore.DocumentSnapshot) => ({ id: d.id, ...(safeFo
 export function createAdminRouter(): Router {
   const router = Router();
   router.use(limits.admin, requireAdmin);
+
+  router.get(
+    '/players/by-name',
+    asyncRoute(async (req, res) => {
+      const name = z.string().min(1).max(40).parse(req.query.name);
+      const [byPlayer, byBoard] = await Promise.all([
+        col.players().where('name', '==', name).limit(20).get(),
+        col.leaderboard().where('nameLower', '==', name.toLocaleLowerCase('tr')).limit(20).get(),
+      ]);
+      const ids = [...new Set([...byPlayer.docs.map((d) => d.id), ...byBoard.docs.map((d) => d.id)])];
+      const rows = await Promise.all(
+        ids.map(async (id) => {
+          const [p, b] = await Promise.all([col.players().doc(id).get(), col.leaderboard().doc(id).get()]);
+          return {
+            playerId: id,
+            name: p.get('name') ?? b.get('name') ?? null,
+            username: p.get('username') ?? null,
+            onBoard: b.exists,
+            boardName: b.get('name') ?? null,
+            level: b.get('level') ?? p.get('level') ?? null,
+            hidden: !!b.get('hidden'),
+            strikes: b.get('strikes') ?? 0,
+          };
+        }),
+      );
+      res.json({ success: true, players: rows });
+    }),
+  );
+
+  router.post(
+    '/players/:playerId/unhide',
+    asyncRoute(async (req, res) => {
+      const id = req.params.playerId;
+      const ok = await leaderboardService.unhide(id);
+      if (!ok) throw new AppError(404, 'not_on_board');
+      logBusinessEvent('player_unhidden', { target: id });
+      res.json({ success: true, playerId: id, hidden: false });
+    }),
+  );
 
   router.get(
     '/players/:playerId',

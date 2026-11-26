@@ -213,6 +213,17 @@ export const leaderboardService = {
     });
   },
 
+  /** Support: a row hidden by mistake (a test account that started high) back on the boards, its strikes cleared. */
+  async unhide(playerId: string): Promise<boolean> {
+    const ref = col.leaderboard().doc(playerId);
+    const snap = await ref.get();
+    if (!snap.exists) return false;
+    await ref.update({ hidden: false, strikes: 0 });
+    topCache.clear();
+    rankCache.delete(playerId);
+    return true;
+  },
+
   async rankOf(playerId: string): Promise<{ rank: number; level: number } | null> {
     return rankCache.getOrLoad(playerId, async () => {
       const snap = await col.leaderboard().doc(playerId).get();
