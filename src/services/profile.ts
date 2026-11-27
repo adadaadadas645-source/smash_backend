@@ -31,7 +31,7 @@ export function safePlayerName(raw: unknown): string {
 }
 
 const count = z.number().int().min(0).max(10_000_000);
-export const statsSchema = z.object({ firstTry: count, bestStreak: count, eventWins: count });
+export const statsSchema = z.object({ firstTry: count, bestStreak: count, eventWins: count, helpsGiven: count.optional(), helpsReceived: count.optional() });
 export type Stats = z.infer<typeof statsSchema>;
 
 export const profileSchema = z.object({

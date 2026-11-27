@@ -108,7 +108,7 @@ export const leaderboardService = {
       const decision = allowedLevel(prev?.level ?? null, prev?.levelReachedAt?.toMillis() ?? null, claimed, now, config.leaderboard.maxLevel);
       const rises = !prev || decision.level > prev.level;
       const prevStats = (prev as { stats?: Stats } | null)?.stats;
-      const statsChanged = !!stats && (!prevStats || prevStats.firstTry !== stats.firstTry || prevStats.bestStreak !== stats.bestStreak || prevStats.eventWins !== stats.eventWins);
+      const statsChanged = !!stats && (!prevStats || prevStats.firstTry !== stats.firstTry || prevStats.bestStreak !== stats.bestStreak || prevStats.eventWins !== stats.eventWins || prevStats.helpsGiven !== stats.helpsGiven || prevStats.helpsReceived !== stats.helpsReceived);
       const profileChanged = !prev || prev.name !== profile.name || prev.avatar !== profile.avatar || prev.frame !== profile.frame || statsChanged;
       // suspectCount (any cut claim, kept for support) is not what hides: strikes are (counted
       // from this rule on, so rows marked under the older, looser one are not hidden by it).
