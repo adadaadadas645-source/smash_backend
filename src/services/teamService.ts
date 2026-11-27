@@ -16,6 +16,8 @@ import { playerService } from './playerService';
  *                                        minCrowns, members, score, leaderId, createdAt, activeAt
  * kingdom_teams/{teamId}/messages/{id}   kind (text | life | join | leave), playerId, name, avatar,
  *                                        frame, text, helpers[], createdAt
+ * kingdom_teams/{teamId}/requests/{pid}  a "by request" team's waiting asker: messageId, level, name, at (the
+ *                                        chat card `joinRequest`, the leader's alone, who accepts or declines)
  * kingdom_team_members/{playerId}        teamId, role (leader | coleader | knight), level, helps,
  *                                        name, avatar, frame, joinedAt
  * kingdom_life_inbox/{playerId}          lives (sent by teammates, not taken yet), from[]
@@ -81,7 +83,9 @@ export interface MemberDoc {
 
 export interface MessageOut {
   id: string;
-  kind: 'text' | 'life' | 'coins' | 'join' | 'leave';
+  kind: 'text' | 'life' | 'coins' | 'join' | 'leave' | 'joinRequest';
+  /** A join request's state: pending, accepted or declined. */
+  status?: string;
   playerId: string;
   name: string;
   avatar: string;
@@ -222,24 +226,69 @@ export const teamService = {
     return { id: teamRef.id };
   },
 
-  async join(playerId: string, teamId: string) {
+  /** Joining: at once in an open team; a "by request" team gets a request card in its chat instead. */
+  async join(playerId: string, teamId: string): Promise<{ requested: boolean }> {
     const me = await profileOf(playerId);
     const teamRef = col.teams().doc(teamId);
     const now = Timestamp.now();
-    await col.teams().firestore.runTransaction(async (tx) => {
-      const [team, mine] = await Promise.all([tx.get(teamRef), tx.get(col.teamMembers().doc(playerId))]);
+    const requested = await col.teams().firestore.runTransaction(async (tx) => {
+      const reqRef = teamRef.collection('requests').doc(playerId);
+      const [team, mine, waiting] = await Promise.all([tx.get(teamRef), tx.get(col.teamMembers().doc(playerId)), tx.get(reqRef)]);
       if (!team.exists) throw new AppError(404, 'team_not_found');
       if (mine.exists) throw new AppError(409, 'already_in_team');
       const t = team.data() as TeamDoc;
       if (t.members >= MAX_MEMBERS) throw new AppError(409, 'team_full');
       if (me.level < t.minLevel) throw new AppError(403, 'level_too_low');
-      // "By request" teams: the request waits for the leader (a later version); for now they are joined as open ones.
+      if (t.type === 'request') {
+        // Asked already: it waits as it is.
+        if (waiting.exists) return true;
+        const msgRef = teamRef.collection('messages').doc();
+        tx.create(msgRef, { kind: 'joinRequest', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: `Level ${me.level}`, status: 'pending', helpers: [], createdAt: now });
+        tx.create(reqRef, { messageId: msgRef.id, level: me.level, name: me.name, avatar: me.avatar, frame: me.frame, at: now });
+        return true;
+      }
       tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(me.level), activeAt: now });
       boardTeam(tx, playerId, t.name);
       tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: '', helpers: [], createdAt: now });
+      return false;
     });
-    listCache.clear();
+    if (!requested) listCache.clear();
+    return { requested };
+  },
+
+  /** The leader answers a join request to their team: in (if there is room), or not. */
+  async answerRequest(byId: string, askerId: string, accept: boolean): Promise<{ joined: boolean }> {
+    const by = await this.memberOf(byId);
+    if (!by) throw new AppError(404, 'not_in_team');
+    // Only the team's leader (the one who made it, or who took the lead after them).
+    if (by.role !== 'leader') throw new AppError(403, 'not_team_leader');
+    const teamRef = col.teams().doc(by.teamId);
+    const reqRef = teamRef.collection('requests').doc(askerId);
+    const asker = accept ? await profileOf(askerId) : null;
+    const now = Timestamp.now();
+    const joined = await col.teams().firestore.runTransaction(async (tx) => {
+      const [req, team, theirs] = await Promise.all([tx.get(reqRef), tx.get(teamRef), tx.get(col.teamMembers().doc(askerId))]);
+      if (!req.exists) throw new AppError(404, 'request_not_found');
+      const msgRef = teamRef.collection('messages').doc(req.get('messageId') as string);
+      tx.delete(reqRef);
+      if (!accept) {
+        tx.set(msgRef, { status: 'declined' }, { merge: true });
+        return false;
+      }
+      const t = team.data() as TeamDoc;
+      // In another team meanwhile, or no room: the request goes.
+      if (theirs.exists) { tx.set(msgRef, { status: 'taken' }, { merge: true }); return false; }
+      if (t.members >= MAX_MEMBERS) throw new AppError(409, 'team_full');
+      tx.set(msgRef, { status: 'accepted' }, { merge: true });
+      tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(asker!.level), activeAt: now });
+      boardTeam(tx, askerId, t.name);
+      tx.create(col.teamMembers().doc(askerId), { teamId: by.teamId, role: 'knight', level: asker!.level, helps: 0, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, joinedAt: now } satisfies MemberDoc);
+      tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId: askerId, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, text: '', helpers: [], createdAt: now });
+      return true;
+    });
+    if (joined) listCache.clear();
+    return { joined };
   },
 
   /** Leaving: the last member out closes the team; a leader leaving hands the lead to the highest member. */
@@ -285,7 +334,9 @@ export const teamService = {
     const m = await this.memberOf(playerId);
     if (!m) throw new AppError(404, 'not_in_team');
     const snap = await col.teams().doc(m.teamId).collection('messages').orderBy('createdAt', 'desc').limit(MESSAGES_KEPT).get();
+    // A join request's card is the leader's alone (they answer it); the others see the "joined" line after.
     const rows: MessageOut[] = snap.docs
+      .filter((d) => d.get('kind') !== 'joinRequest' || m.role === 'leader')
       .map((d) => {
         const x = d.data();
         const helpers = (x.helpers as string[]) ?? [];
@@ -301,6 +352,7 @@ export const teamService = {
           helpedByMe: helpers.includes(playerId),
           mine: x.playerId === playerId,
           at: (x.createdAt as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0,
+          ...(x.status ? { status: x.status as string } : {}),
         } satisfies MessageOut;
       })
       .reverse();

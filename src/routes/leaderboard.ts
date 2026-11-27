@@ -59,7 +59,8 @@ export function createLeaderboardRouter(): Router {
     '/world',
     asyncRoute<PlayerRequest>(async (req, res) => {
       const [top, me, total] = await Promise.all([leaderboardService.topFor(req.playerId), leaderboardService.rankOf(req.playerId), leaderboardService.total()]);
-      const rows = top.rows.map(({ playerId, hidden: _hidden, ...row }) => (playerId === req.playerId ? { ...row, me: true } : row));
+      // The player id stays (a card opened from the board can send a friend request); hidden never goes out.
+      const rows = top.rows.map(({ hidden: _hidden, ...row }) => (row.playerId === req.playerId ? { ...row, me: true } : row));
       // In the list: its place there is the truth (the count may be a few seconds older).
       const inList = rows.find((r) => r.me);
       res.set('Cache-Control', 'private, max-age=15');

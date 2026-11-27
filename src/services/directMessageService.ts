@@ -167,6 +167,14 @@ export const directMessageService = {
       threads().where('b', '==', me).limit(200).get(),
       col.friends().where('owner', '==', me).where('status', '==', 'incoming').limit(50).get(),
     ]);
+    // The leader of a "by request" team: who asked to join it.
+    const member = await col.teamMembers().doc(me).get();
+    const teamAsks =
+      member.exists && member.get('role') === 'leader'
+        ? (await col.teams().doc(member.get('teamId') as string).collection('requests').limit(50).get()).docs
+            .map((d) => ({ playerId: d.id, name: (d.get('name') as string) ?? 'A player', avatar: (d.get('avatar') as string) ?? 'leo', frame: (d.get('frame') as string) ?? 'gold', at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
+            .filter((r) => r.at > after)
+        : [];
     const words = [...asA.docs, ...asB.docs]
       .filter((t) => t.get('lastFrom') && t.get('lastFrom') !== me && ((t.get('lastAt') as number) ?? 0) > after)
       .map((t) => ({ playerId: t.get('lastFrom') as string, text: (t.get('lastText') as string) ?? '', at: t.get('lastAt') as number }));
@@ -175,12 +183,18 @@ export const directMessageService = {
       .filter((r) => r.at > after);
     // Their names (the board's row, else the player's own).
     const ids = [...new Set([...words.map((w) => w.playerId), ...requests.map((r) => r.playerId)])];
-    const names = new Map<string, string>();
-    await Promise.all(ids.map(async (id) => names.set(id, (await face(id).catch(() => null))?.name ?? 'A player')));
+    const faces = new Map<string, { name: string; avatar: string; frame: string }>();
+    await Promise.all(
+      ids.map(async (id) => {
+        const f = await face(id).catch(() => null);
+        faces.set(id, { name: f?.name ?? 'A player', avatar: f?.avatar ?? 'leo', frame: f?.frame ?? 'gold' });
+      }),
+    );
     return {
       now: Date.now(),
-      requests: requests.map((r) => ({ ...r, name: names.get(r.playerId) })),
-      messages: words.sort((x, y) => x.at - y.at).map((w) => ({ ...w, name: names.get(w.playerId) })),
+      requests: requests.map((r) => ({ ...r, ...faces.get(r.playerId) })),
+      messages: words.sort((x, y) => x.at - y.at).map((w) => ({ ...w, ...faces.get(w.playerId) })),
+      teamRequests: teamAsks,
     };
   },
 

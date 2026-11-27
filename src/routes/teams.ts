@@ -79,9 +79,12 @@ export function createTeamRouter(): Router {
     res.json({ success: true });
   }));
   router.get('/:id', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await teamService.info(idParam.parse(req.params.id))) })));
+  router.post('/requests/:playerId', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    const body = z.object({ accept: z.boolean() }).parse(req.body);
+    res.json({ success: true, ...(await teamService.answerRequest(req.playerId, idParam.parse(req.params.playerId), body.accept)) });
+  }));
   router.post('/:id/join', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
-    await teamService.join(req.playerId, idParam.parse(req.params.id));
-    res.json({ success: true });
+    res.json({ success: true, ...(await teamService.join(req.playerId, idParam.parse(req.params.id))) });
   }));
   return router;
 }

@@ -103,6 +103,26 @@ export function visibleTo<T extends { rank: number; playerId: string; hidden?: b
   return rows.filter((r) => !r.hidden || r.playerId === viewer).map(({ hidden: _hidden, ...r }, i) => ({ ...r, rank: i + 1 }) as T);
 }
 
+/** New friend requests a player may send in a day (UTC): no adding the whole board at once. */
+export const FRIEND_REQUESTS_PER_DAY = 20;
+const today = () => new Date().toISOString().slice(0, 10);
+
+async function requestsLeftToday(playerId: string) {
+  const p = await col.players().doc(playerId).get();
+  const n = p.get('friendReqDay') === today() ? ((p.get('friendReqN') as number) ?? 0) : 0;
+  if (n >= FRIEND_REQUESTS_PER_DAY) throw new AppError(429, 'friend_limit_today');
+}
+
+async function countRequest(playerId: string) {
+  const ref = col.players().doc(playerId);
+  await col.players().firestore.runTransaction(async (tx) => {
+    const p = await tx.get(ref);
+    if (!p.exists) return;
+    const same = p.get('friendReqDay') === today();
+    tx.update(ref, { friendReqDay: today(), friendReqN: same ? ((p.get('friendReqN') as number) ?? 0) + 1 : 1 });
+  });
+}
+
 export const socialService = {
   /** After a level is taken on the board: the week's points and the row's country. */
   async onLevel(playerId: string, gained: number, profile: { name: string; avatar: string; frame: string; level: number; locale?: string | null }) {
@@ -223,11 +243,13 @@ export const socialService = {
 
   /** A friend request by their ID (invite code); one already asking me is accepted instead. */
   async request(playerId: string, rawCode: string, byId?: string): Promise<{ status: 'outgoing' | 'friend' }> {
+    await requestsLeftToday(playerId);
     let other: string | null = null;
     if (byId?.startsWith('seed_')) {
       // A launch sample player (seedService): the request goes out as to anyone, and stays waiting.
       const row = await col.leaderboard().doc(byId).get();
       if (!row.exists || !row.get('seed')) throw new AppError(404, 'player_not_found');
+      await countRequest(playerId);
       return { status: 'outgoing' };
     }
     if (byId) {
@@ -256,7 +278,10 @@ export const socialService = {
       }
       if (!theirs.exists) tx.set(theirsRef, { owner: other, other: playerId, status: 'incoming', at });
       tx.set(mineRef, { owner: playerId, other, status: 'outgoing', at });
-      return { status: 'outgoing' as const };
+      return { status: 'outgoing' as const, fresh: !mine.exists };
+    }).then(async (r) => {
+      if ('fresh' in r && r.fresh) await countRequest(playerId);
+      return { status: r.status };
     });
   },
 
