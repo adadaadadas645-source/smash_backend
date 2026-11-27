@@ -757,13 +757,17 @@ export const teamService = {
     return { coins: HELP_COINS };
   },
 
-  /** The lives teammates sent, taken (the inbox emptied); the game adds them. */
-  async takeLives(playerId: string): Promise<number> {
+  /**
+   * The lives teammates sent, taken; the game adds them. `max`: only as many as the player has room
+   * for (their hearts are capped): the rest stay in the inbox for later, never lost. No `max`: all.
+   */
+  async takeLives(playerId: string, max?: number): Promise<number> {
     const ref = col.lifeInbox().doc(playerId);
     return col.lifeInbox().firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
-      const n = (snap.get('lives') as number) ?? 0;
-      if (n > 0) tx.set(ref, { lives: 0, takenAt: FieldValue.serverTimestamp() }, { merge: true });
+      const have = (snap.get('lives') as number) ?? 0;
+      const n = max === undefined ? have : Math.max(0, Math.min(have, Math.floor(max)));
+      if (n > 0) tx.set(ref, { lives: have - n, takenAt: FieldValue.serverTimestamp() }, { merge: true });
       return n;
     });
   },

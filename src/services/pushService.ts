@@ -77,7 +77,11 @@ export const pushService = {
     await col.players().doc(playerId).set({ push: { token, env } }, { merge: true });
   },
 
-  /** A short alert to one player (nothing when they have no token or chat is off for them). */
+  /**
+   * A short alert to one player (nothing when they have no token). Team chat sends none: the only
+   * team alert is a teammate's gift (team_help: a life or coins received), sent whatever the
+   * player's chat switch, since it is not chat.
+   */
   async toPlayer(playerId: string, title: string, body: string, data: Record<string, string> = {}) {
     const p = await col.players().doc(playerId).get();
     const push = p.get('push') as { token?: string; env?: string } | undefined;

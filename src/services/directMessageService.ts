@@ -56,6 +56,33 @@ async function exists(playerId: string) {
   if (!p.exists) throw new AppError(404, 'player_not_found');
 }
 
+/**
+ * The team chat's unread count for the badge: messages from others newer than `seen` (the newest
+ * message time the game has shown, ms; at most 50 counted), as the chat shows them to this player
+ * (no blocked player's, no join request unless they may answer it, no words with their chat off).
+ * With no `seen` yet (a first look) nothing counts: `lastAt` tells the game where to start from.
+ */
+async function teamUnreadOf(me: string, teamId: string, role: string, seen: number, blocked: Set<string>, chatOff: boolean): Promise<{ unread: number; lastAt: number }> {
+  const msgs = col.teams().doc(teamId).collection('messages');
+  const fresh = Number.isFinite(seen) && seen > 0;
+  const snap = fresh
+    ? await msgs.where('createdAt', '>', Timestamp.fromMillis(seen)).orderBy('createdAt', 'desc').limit(50).get()
+    : await msgs.orderBy('createdAt', 'desc').limit(1).get();
+  const at = (d: FirebaseFirestore.QueryDocumentSnapshot) => (d.get('createdAt') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0;
+  const lastAt = snap.empty ? (fresh ? seen : 0) : at(snap.docs[0]);
+  if (!fresh) return { unread: 0, lastAt };
+  const mayAnswer = role === 'leader' || role === 'coleader';
+  const unread = snap.docs.filter((d) => {
+    const from = d.get('playerId') as string;
+    const kind = d.get('kind') as string;
+    if (from === me || blocked.has(from)) return false;
+    if (kind === 'joinRequest') return mayAnswer && (d.get('status') ?? 'pending') === 'pending';
+    if (kind === 'text' && chatOff) return false;
+    return true;
+  }).length;
+  return { unread, lastAt };
+}
+
 export const directMessageService = {
   /** Players by name (starting with what was typed; the hidden left out): at most 10. */
   async search(me: string, raw: string) {
@@ -170,7 +197,7 @@ export const directMessageService = {
    * What came for the player since `since` (ms), for the game's banners: friend requests and
    * words from other players (the newest word of each conversation they wrote last).
    */
-  async inbox(me: string, since: number) {
+  async inbox(me: string, since: number, teamSeen = 0) {
     const after = Number.isFinite(since) && since > 0 ? since : Date.now() - 24 * 3600_000;
     const [asA, asB, reqs, meDoc, member, blockedList] = await Promise.all([
       DM_ENABLED ? threads().where('a', '==', me).limit(200).get() : Promise.resolve(null),
@@ -192,9 +219,14 @@ export const directMessageService = {
     const words = (DM_ENABLED && asA && asB ? [...asA.docs, ...asB.docs] : [])
       .filter((t) => t.get('lastFrom') && t.get('lastFrom') !== me && ((t.get('lastAt') as number) ?? 0) > after)
       .map((t) => ({ playerId: t.get('lastFrom') as string, text: (t.get('lastText') as string) ?? '', at: t.get('lastAt') as number }));
-    const requests = reqs.docs
+    const waiting = reqs.docs
       .map((d) => ({ playerId: d.get('other') as string, at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
-      .filter((r) => r.at > after && !blocked.has(r.playerId));
+      .filter((r) => !blocked.has(r.playerId));
+    const requests = waiting.filter((r) => r.at > after);
+    const [team, gifts] = await Promise.all([
+      member.exists ? teamUnreadOf(me, member.get('teamId') as string, role, teamSeen, blocked, !!meDoc.get('chatOff')) : Promise.resolve({ unread: 0, lastAt: 0 }),
+      col.lifeInbox().doc(me).get(),
+    ]);
     // Their names (the board's row, else the player's own).
     const ids = [...new Set([...words.map((w) => w.playerId), ...requests.map((r) => r.playerId)])];
     const faces = new Map<string, { name: string; avatar: string; frame: string }>();
@@ -215,6 +247,14 @@ export const directMessageService = {
         return a && a.at > after ? a : null;
       })(),
       pendingTeam: (meDoc.get('pendingTeam') as { teamId: string; name: string } | undefined) ?? null,
+      // The badges: every friend request still waiting (when each came: the game counts those it
+      // has not shown yet), and the team chat's messages from others since the game last showed it.
+      friendRequestsAt: waiting.map((r) => r.at),
+      teamUnread: team.unread,
+      teamLastAt: team.lastAt,
+      // Lives and coins teammates sent, waiting to be taken (the game takes them wherever it is).
+      livesWaiting: (gifts.get('lives') as number) ?? 0,
+      coinsWaiting: (gifts.get('coins') as number) ?? 0,
     };
   },
 

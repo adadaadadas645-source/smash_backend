@@ -8,7 +8,8 @@ import { directMessageService } from '../services/directMessageService';
 /**
  * Direct messages between two players (services/directMessageService.ts):
  *
- * GET  /dm/inbox?since=ms            -> { now, requests: [{ playerId, name, at }], messages: [{ playerId, name, text, at }] }
+ * GET  /dm/inbox?since=ms&teamSeen=ms -> { now, requests: [{ playerId, name, at }], messages: [{ playerId, name, text, at }],
+ *                                      friendRequestsAt: [ms], teamUnread, teamLastAt }
  * GET  /dm/search?name=Player43       -> { players: [{ playerId, name, avatar, frame, level, team, stats }] }
  * GET  /dm/find/:code                 -> { player: { playerId, code, name, avatar, frame, level, team, stats, friend } }
  * GET  /dm/:playerId                  -> { other, messages, livesWaiting, coinsWaiting, askLifeInMs, askCoinsInMs }
@@ -23,7 +24,7 @@ export function createDirectMessageRouter(): Router {
   const router = Router();
   router.use(requirePlayer, limits.player);
 
-  router.get('/inbox', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await directMessageService.inbox(req.playerId, Number(req.query.since ?? 0))) })));
+  router.get('/inbox', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await directMessageService.inbox(req.playerId, Number(req.query.since ?? 0), Number(req.query.teamSeen ?? 0))) })));
   router.get('/search', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await directMessageService.search(req.playerId, String(req.query.name ?? ''))) })));
   router.get('/find/:code', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await directMessageService.find(req.playerId, String(req.params.code))) })));
   router.get('/:other', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await directMessageService.read(req.playerId, playerId.parse(req.params.other))) })));

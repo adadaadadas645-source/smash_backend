@@ -24,7 +24,7 @@ import { logBusinessEvent } from '../utils/logger';
  * POST   /teams/requests/:playerId    { accept } -> { joined }
  * POST   /teams/life/ask
  * POST   /teams/life/:messageId/help  -> { coins }
- * POST   /teams/life/take             -> { lives }
+ * POST   /teams/life/take             { max? } -> { lives }   (max: room in the hearts; the rest wait)
  * POST   /teams/coins/ask
  * POST   /teams/coins/:messageId/help -> { coins }  (the helper's; the asker's go to the inbox)
  * POST   /teams/coins/take            -> { coins }
@@ -79,7 +79,11 @@ export function createTeamRouter(): Router {
     await teamService.askLife(req.playerId);
     res.json({ success: true });
   }));
-  router.post('/life/take', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, lives: await teamService.takeLives(req.playerId) })));
+  router.post('/life/take', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    // { max }: only as many as the player's hearts have room for (the rest wait); none given: all.
+    const body = z.object({ max: z.number().int().min(0).max(100).optional() }).parse(req.body ?? {});
+    res.json({ success: true, lives: await teamService.takeLives(req.playerId, body.max) });
+  }));
   router.post('/coins/ask', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     await teamService.askCoins(req.playerId);
     res.json({ success: true });
