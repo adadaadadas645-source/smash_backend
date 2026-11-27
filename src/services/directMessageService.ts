@@ -253,6 +253,8 @@ export const directMessageService = {
       teamUnread: team.unread,
       teamLastAt: team.lastAt,
       // Lives and coins teammates sent, waiting to be taken (the game takes them wherever it is).
+      // The player's team and role now: the game sees a change (made a leader, removed) wherever it is.
+      myTeam: member.exists ? { teamId: member.get('teamId') as string, role } : null,
       livesWaiting: (gifts.get('lives') as number) ?? 0,
       coinsWaiting: (gifts.get('coins') as number) ?? 0,
     };

@@ -18,7 +18,7 @@ import { pushService } from './pushService';
  *
  * kingdom_teams/{teamId}                 name, nameLower, description, crest, type, minLevel,
  *                                        minCrowns, members, score, leaderId, createdAt, activeAt
- * kingdom_teams/{teamId}/messages/{id}   kind (text | life | coins | join | leave | joinRequest),
+ * kingdom_teams/{teamId}/messages/{id}   kind (text | life | coins | join | leave | role | joinRequest),
  *                                        playerId, name, avatar, frame, text, helpers[], createdAt
  * kingdom_teams/{teamId}/requests/{pid}  a "by request" team's waiting asker: messageId, level, name, at
  * kingdom_team_members/{playerId}        teamId, role (leader | coleader | knight), level,
@@ -95,7 +95,7 @@ export interface MemberDoc {
 
 export interface MessageOut {
   id: string;
-  kind: 'text' | 'life' | 'coins' | 'join' | 'leave' | 'joinRequest';
+  kind: 'text' | 'life' | 'coins' | 'join' | 'leave' | 'role' | 'joinRequest';
   /** A join request's state: pending, accepted, declined or cancelled. */
   status?: string;
   playerId: string;
@@ -629,7 +629,8 @@ export const teamService = {
         const t = teamSnap.data() as TeamDoc;
         const sub = Math.max(0, target.countedScore ?? target.level ?? 0);
         tx.update(teamRef, { members: Math.max(1, t.members - 1), score: Math.max(0, (t.score ?? 0) - sub), activeAt: now });
-        tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId: targetId, name: target.name, avatar: target.avatar, frame: target.frame, text: '', helpers: [], createdAt: now });
+        // "removed": the chat says the member was removed (not that they left).
+        tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId: targetId, name: target.name, avatar: target.avatar, frame: target.frame, text: 'removed', helpers: [], createdAt: now });
         kickedFrom = t.name;
       }
     });
@@ -647,21 +648,43 @@ export const teamService = {
     if (!byPre.exists) throw new AppError(404, 'not_in_team');
     const teamId = byPre.get('teamId') as string;
     const teamRef = col.teams().doc(teamId);
+    const now = Timestamp.now();
+    let teamName = '';
+    let changed = false;
     await col.teams().firestore.runTransaction(async (tx) => {
+      changed = false;
       const [bySnap, targetSnap, teamSnap] = await Promise.all([tx.get(byRef), tx.get(targetRef), tx.get(teamRef)]);
       if (!bySnap.exists) throw new AppError(404, 'not_in_team');
       const actor = bySnap.data() as MemberDoc;
       if (actor.role !== 'leader') throw new AppError(403, 'not_team_leader');
       if (!targetSnap.exists || targetSnap.get('teamId') !== actor.teamId) throw new AppError(404, 'member_not_found');
       if (!teamSnap.exists) throw new AppError(404, 'team_not_found');
+      const target = targetSnap.data() as MemberDoc;
+      teamName = (teamSnap.get('name') as string) ?? '';
+      if (target.role === role) return;
+      changed = true;
+      const msgs = teamRef.collection('messages');
+      // A line in the team's chat for everyone: who has which role now (the game redraws the team from it).
+      const roleLine = (m: MemberDoc, id: string, r: Role) =>
+        tx.create(msgs.doc(), { kind: 'role', playerId: id, name: m.name, avatar: m.avatar, frame: m.frame, text: r, helpers: [], createdAt: now });
       if (role === 'leader') {
         tx.update(byRef, { role: 'coleader' });
         tx.update(targetRef, { role: 'leader' });
-        tx.update(teamRef, { leaderId: targetId });
+        tx.update(teamRef, { leaderId: targetId, activeAt: now });
+        roleLine(target, targetId, 'leader');
+        roleLine(actor, byId, 'coleader');
       } else {
         tx.update(targetRef, { role });
+        tx.update(teamRef, { activeAt: now });
+        roleLine(target, targetId, role);
       }
     });
+    // The member hears it on their phone.
+    if (changed) {
+      if (role === 'leader') notify(targetId, 'You are the leader now! 👑', `You lead ${teamName} now. Look after your team!`, 'team_role');
+      else if (role === 'coleader') notify(targetId, 'You are a Co-Leader! ⭐', `You are now a Co-Leader of ${teamName}. You can answer join requests.`, 'team_role');
+      else notify(targetId, 'Team update', `You are a Knight in ${teamName} now.`, 'team_role');
+    }
     return { role };
   },
 
