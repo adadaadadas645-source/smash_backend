@@ -29,6 +29,8 @@ import { safetyService } from './safetyService';
  */
 export const MAX_MEMBERS = 50;
 export const CREATE_COST = 100;
+/** The level a player must reach to make a team (joining one has no such bar, only the team's own). */
+export const CREATE_FROM_LEVEL = 80;
 export const LIFE_HELPS = 5;
 export const HELP_COINS = 5;
 export const ASK_LIFE_COOLDOWN_MS = 4 * 60 * 60 * 1000;
@@ -212,6 +214,7 @@ export const teamService = {
 
   async create(playerId: string, input: z.infer<typeof createSchema>) {
     const me = await profileOf(playerId);
+    if (me.level < CREATE_FROM_LEVEL) throw new AppError(403, 'create_level_too_low');
     const name = cleanName(input.name);
     // A team's name and description are seen by everyone: no rude word, no personal information.
     if (nameIsRude(name)) throw new AppError(400, 'team_name_rude');
@@ -263,6 +266,14 @@ export const teamService = {
       if (t.type === 'request') {
         // Asked already: it waits as it is.
         if (waiting.exists) return true;
+        // One request at a time: another team's still waiting -> no.
+        const meDoc = await tx.get(col.players().doc(playerId));
+        const pending = meDoc.get('pendingTeam') as { teamId: string } | undefined;
+        if (pending && pending.teamId !== teamId) {
+          const other = await tx.get(col.teams().doc(pending.teamId).collection('requests').doc(playerId));
+          if (other.exists) throw new AppError(409, 'request_pending', undefined, { team: (meDoc.get('pendingTeam') as { name?: string }).name ?? null });
+        }
+        tx.set(col.players().doc(playerId), { pendingTeam: { teamId, name: t.name, at: now } }, { merge: true });
         const msgRef = teamRef.collection('messages').doc();
         tx.create(msgRef, { kind: 'joinRequest', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: `Level ${me.level}`, status: 'pending', helpers: [], createdAt: now });
         tx.create(reqRef, { messageId: msgRef.id, level: me.level, name: me.name, avatar: me.avatar, frame: me.frame, at: now });
@@ -272,6 +283,7 @@ export const teamService = {
       boardTeam(tx, playerId, t.name);
       tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: '', helpers: [], createdAt: now });
+      tx.set(col.players().doc(playerId), { pendingTeam: FieldValue.delete() }, { merge: true });
       return false;
     });
     if (!requested) listCache.clear();
@@ -293,15 +305,19 @@ export const teamService = {
       if (!req.exists) throw new AppError(404, 'request_not_found');
       const msgRef = teamRef.collection('messages').doc(req.get('messageId') as string);
       tx.delete(reqRef);
+      const answer = (accepted: boolean) =>
+        tx.set(col.players().doc(askerId), { pendingTeam: FieldValue.delete(), teamAnswer: { teamId: by.teamId, name: (team.get('name') as string) ?? '', accepted, at: Date.now() } }, { merge: true });
       if (!accept) {
         tx.set(msgRef, { status: 'declined' }, { merge: true });
+        answer(false);
         return false;
       }
       const t = team.data() as TeamDoc;
       // In another team meanwhile, or no room: the request goes.
-      if (theirs.exists) { tx.set(msgRef, { status: 'taken' }, { merge: true }); return false; }
+      if (theirs.exists) { tx.set(msgRef, { status: 'taken' }, { merge: true }); tx.set(col.players().doc(askerId), { pendingTeam: FieldValue.delete() }, { merge: true }); return false; }
       if (t.members >= MAX_MEMBERS) throw new AppError(409, 'team_full');
       tx.set(msgRef, { status: 'accepted' }, { merge: true });
+      answer(true);
       tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(asker!.level), activeAt: now });
       boardTeam(tx, askerId, t.name);
       tx.create(col.teamMembers().doc(askerId), { teamId: by.teamId, role: 'knight', level: asker!.level, helps: 0, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, joinedAt: now } satisfies MemberDoc);

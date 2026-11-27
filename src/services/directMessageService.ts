@@ -177,6 +177,7 @@ export const directMessageService = {
       threads().where('b', '==', me).limit(200).get(),
       col.friends().where('owner', '==', me).where('status', '==', 'incoming').limit(50).get(),
     ]);
+    const meDoc = await col.players().doc(me).get();
     // The leader of a "by request" team: who asked to join it.
     const member = await col.teamMembers().doc(me).get();
     const teamAsks =
@@ -206,6 +207,12 @@ export const directMessageService = {
       requests: requests.map((r) => ({ ...r, ...faces.get(r.playerId) })),
       messages: words.sort((x, y) => x.at - y.at).map((w) => ({ ...w, ...faces.get(w.playerId) })),
       teamRequests: teamAsks,
+      // The answer to the player's own request to join a team (once, when it is new).
+      teamAnswer: (() => {
+        const a = meDoc.get('teamAnswer') as { teamId: string; name: string; accepted: boolean; at: number } | undefined;
+        return a && a.at > after ? a : null;
+      })(),
+      pendingTeam: (meDoc.get('pendingTeam') as { teamId: string; name: string } | undefined) ?? null,
     };
   },
 
