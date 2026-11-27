@@ -229,16 +229,26 @@ function closeRequest(tx: FirebaseFirestore.Transaction, req: FirebaseFirestore.
   if (msgId && teamRef) tx.set(teamRef.collection('messages').doc(msgId), { status }, { merge: true });
 }
 
-/** A brand-new account may not write yet (a spam bot's first minutes); a player's chat is off; the same words twice in a row are refused. */
-export const NEW_ACCOUNT_CHAT_MS = 10 * 60_000;
+/** A team alert to one phone (even while the game is closed); never in the way of the answer. */
+function notify(playerId: string, title: string, body: string, kind: string) {
+  void pushService.toPlayer(playerId, title, body, { kind }).catch(() => undefined);
+}
+
+/** A team's leader and co-leaders (those who answer its join requests). */
+async function answerersOf(teamId: string): Promise<string[]> {
+  const members = await col.teamMembers().where('teamId', '==', teamId).limit(MAX_MEMBERS).get();
+  return members.docs.filter((d) => canAnswerRequest(d.get('role') as Role)).map((d) => d.id);
+}
+
+/**
+ * A player's chat is off; the same words twice in a row are refused. (No wait for a new account:
+ * a player writes as soon as they are in a team; the word filter, reports and blocks guard the chat.)
+ */
 export const SAME_MESSAGE_MS = 60_000;
 
 async function chatGuard(playerId: string, text: string) {
   const ref = col.players().doc(playerId);
   const p = await ref.get();
-  const created = (p.get('createdAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis?.() ?? 0;
-  // How long is left, for the game's message ("You can write in 7 minutes").
-  if (created && Date.now() - created < NEW_ACCOUNT_CHAT_MS) throw new AppError(403, 'too_new_to_chat', undefined, { inMs: NEW_ACCOUNT_CHAT_MS - (Date.now() - created) });
   if (p.get('chatOff')) throw new AppError(403, 'chat_off');
   const last = (p.get('lastChat') as string | undefined) ?? '';
   const lastAt = (p.get('lastChatAt') as number | undefined) ?? 0;
@@ -371,7 +381,9 @@ export const teamService = {
     const me = await profileOf(playerId);
     const teamRef = col.teams().doc(teamId);
     const now = Timestamp.now();
+    let newRequestTo: string | null = null;
     const requested = await col.teams().firestore.runTransaction(async (tx) => {
+      newRequestTo = null;
       const reqRef = teamRef.collection('requests').doc(playerId);
       const playerRef = col.players().doc(playerId);
       const boardRef = col.leaderboard().doc(playerId);
@@ -390,6 +402,7 @@ export const teamService = {
       if (t.type === 'request') {
         // Asked already: it waits as it is.
         if (waiting.exists) return true;
+        newRequestTo = t.name;
         // One request at a time: only blocks if BOTH the other team AND its request doc still exist.
         const pending = meDoc.get('pendingTeam') as { teamId: string; name?: string } | undefined;
         if (pending && pending.teamId !== teamId) {
@@ -420,6 +433,13 @@ export const teamService = {
       return false;
     });
     if (!requested) listCache.clear();
+    // A new request: its leader and co-leaders hear of it on their phones.
+    if (newRequestTo) {
+      const teamName = newRequestTo as string;
+      void answerersOf(teamId)
+        .then((ids) => ids.forEach((id) => notify(id, 'New join request 🛡️', `${me.name} wants to join ${teamName}!`, 'team_request')))
+        .catch(() => undefined);
+    }
     return { requested };
   },
 
@@ -454,7 +474,10 @@ export const teamService = {
     const reqRef = teamRef.collection('requests').doc(askerId);
     const asker = accept ? await profileOf(askerId) : null;
     const now = Timestamp.now();
+    let teamName = '';
+    let answered: 'accepted' | 'declined' | null = null;
     const joined = await col.teams().firestore.runTransaction(async (tx) => {
+      answered = null;
       const boardRef = col.leaderboard().doc(askerId);
       const [req, team, theirs, boardSnap, askerSnap] = await Promise.all([
         tx.get(reqRef),
@@ -470,9 +493,11 @@ export const teamService = {
       tx.delete(reqRef);
       const answer = (accepted: boolean) =>
         tx.set(col.players().doc(askerId), { pendingTeam: FieldValue.delete(), teamAnswer: { teamId: by.teamId, name: (team.get('name') as string) ?? '', accepted, at: Date.now() } }, { merge: true });
+      teamName = (team.get('name') as string) ?? '';
       if (!accept) {
         tx.set(msgRef, { status: 'declined' }, { merge: true });
         answer(false);
+        answered = 'declined';
         return false;
       }
       const t = team.data() as TeamDoc;
@@ -492,9 +517,13 @@ export const teamService = {
       boardTeam(tx, boardSnap, t.name);
       tx.create(col.teamMembers().doc(askerId), { teamId: by.teamId, role: 'knight', level: asker!.level, countedScore: contrib, helps: 0, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId: askerId, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, text: '', helpers: [], createdAt: now });
+      answered = 'accepted';
       return true;
     });
     if (joined) listCache.clear();
+    // The asker hears the answer on their phone.
+    if (answered === 'accepted') notify(askerId, 'Welcome to the team! 🎉', `${teamName} accepted your request. Say hello to your new team!`, 'team_accepted');
+    else if (answered === 'declined') notify(askerId, 'Join request', `${teamName} did not accept your request this time. Try another team!`, 'team_declined');
     return { joined };
   },
 
@@ -584,7 +613,9 @@ export const teamService = {
     const teamId = byPre.get('teamId') as string;
     const teamRef = col.teams().doc(teamId);
     const now = Timestamp.now();
+    let kickedFrom: string | null = null;
     await col.teams().firestore.runTransaction(async (tx) => {
+      kickedFrom = null;
       const targetBoardRef = col.leaderboard().doc(targetId);
       const [bySnap, targetSnap, teamSnap, targetBoardSnap] = await Promise.all([tx.get(byRef), tx.get(targetRef), tx.get(teamRef), tx.get(targetBoardRef)]);
       if (!bySnap.exists) throw new AppError(404, 'not_in_team');
@@ -599,9 +630,12 @@ export const teamService = {
         const sub = Math.max(0, target.countedScore ?? target.level ?? 0);
         tx.update(teamRef, { members: Math.max(1, t.members - 1), score: Math.max(0, (t.score ?? 0) - sub), activeAt: now });
         tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId: targetId, name: target.name, avatar: target.avatar, frame: target.frame, text: '', helpers: [], createdAt: now });
+        kickedFrom = t.name;
       }
     });
     listCache.clear();
+    // The player removed hears it on their phone.
+    if (kickedFrom) notify(targetId, 'Team update', `You were removed from ${kickedFrom}. Find a new team in the Team tab!`, 'team_kicked');
   },
 
   /** Leader promotes/demotes a member (`coleader` | `knight`) or transfers leadership (`leader`). */
