@@ -18,6 +18,11 @@ idx() {
 
 idx kingdom_leaderboard field-path=level,order=descending field-path=levelReachedAt,order=ascending
 idx kingdom_leaderboard field-path=level,order=ascending  field-path=levelReachedAt,order=ascending
+# Country board, weekly race, country team board, a player's recent tournaments.
+idx kingdom_leaderboard field-path=country,order=ascending field-path=level,order=descending field-path=levelReachedAt,order=ascending
+idx kingdom_weekly field-path=week,order=ascending field-path=points,order=descending field-path=level,order=descending
+idx kingdom_teams field-path=country,order=ascending field-path=score,order=descending
+idx kingdom_tournament_entries field-path=playerId,order=ascending field-path=joinedAt,order=descending
 for f in playerId requestId kind name; do
   idx kingdom_logs field-path=$f,order=ascending field-path=at,order=descending
 done

@@ -34,6 +34,8 @@ export interface BoardEntry {
   level: number;
   levelReachedAt: FirebaseFirestore.Timestamp;
   updatedAt: FirebaseFirestore.Timestamp;
+  country?: string;
+  countrySetAt?: FirebaseFirestore.Timestamp;
   suspectCount?: number;
   /** Claims far over what could be played (claimSuspect), and flag()s; HIDE_AFTER of them hide the row. */
   strikes?: number;
@@ -65,6 +67,27 @@ export const MAX_STEP = 30;
 export const SUSPECT_MARGIN = 25;
 /** Suspect claims after which the row is hidden from the others' boards. */
 export const HIDE_AFTER = 3;
+/** Minimum time before a player's leaderboard country can change (prevents locale-switching to farm easier country boards). */
+export const COUNTRY_CHANGE_COOLDOWN_MS = 30 * 86_400_000;
+
+/**
+ * Whether `nextCountry` should be written onto the player's leaderboard row:
+ * - Always when the row has no country yet.
+ * - Never when it is the same country (saves a write on every level).
+ * - Only after COUNTRY_CHANGE_COOLDOWN_MS when changing to a different country.
+ */
+export function shouldUpdateCountry(
+  prevCountry: string | null | undefined,
+  prevSetAtMs: number | null | undefined,
+  nextCountry: string | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!nextCountry || !/^[A-Z]{2}$/.test(nextCountry)) return false;
+  if (!prevCountry) return true;
+  if (prevCountry === nextCountry) return false;
+  if (!prevSetAtMs) return false;
+  return nowMs - prevSetAtMs >= COUNTRY_CHANGE_COOLDOWN_MS;
+}
 
 /** The highest level the server takes now, given the last accepted one and when it came. */
 export function allowedLevel(prevLevel: number | null, prevAtMs: number | null, claimed: number, nowMs: number, maxLevel: number): { level: number; clamped: boolean; first: boolean } {
@@ -84,9 +107,12 @@ export function claimSuspect(claimed: number, decision: { level: number; first: 
 }
 
 type Top = { rows: Array<BoardRowOut & { playerId: string }>; at: string };
+type HiddenEntry = { playerId: string; level: number; reachedAtMs: number };
 const topCache = new TtlCache<Top>(config.leaderboard.cacheMs, 4);
 const rankCache = new TtlCache<{ rank: number; level: number } | null>(config.leaderboard.cacheMs, 50_000);
 const totalCache = new TtlCache<number>(60_000, 2);
+/** One shared query per minute of hidden rows: keeps top(), rankOf() and total() accurate with zero extra indexes. */
+const hiddenCache = new TtlCache<HiddenEntry[]>(60_000, 2);
 
 export interface SubmitResult {
   level: number;
@@ -96,10 +122,29 @@ export interface SubmitResult {
   previous: number | null;
   /** The row is (now) left out of the others' boards. */
   hidden: boolean;
+  /** True only on the transition from visible -> hidden. */
+  hides: boolean;
 }
 
 export const leaderboardService = {
-  async submit(playerId: string, claimed: number, profile: { name: string; avatar: string; frame: string }, stats?: Stats): Promise<SubmitResult> {
+  async hiddenEntries(): Promise<HiddenEntry[]> {
+    return hiddenCache.getOrLoad('all', async () => {
+      const snap = await col.leaderboard().where('hidden', '==', true).select('level', 'levelReachedAt').limit(500).get();
+      return snap.docs.map((d) => ({
+        playerId: d.id,
+        level: (d.get('level') as number) ?? 0,
+        reachedAtMs: (d.get('levelReachedAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis?.() ?? Number.MAX_SAFE_INTEGER,
+      }));
+    });
+  },
+
+  async submit(
+    playerId: string,
+    claimed: number,
+    profile: { name: string; avatar: string; frame: string },
+    stats?: Stats,
+    country?: string | null,
+  ): Promise<SubmitResult> {
     const ref = col.leaderboard().doc(playerId);
     const result = await col.leaderboard().firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -110,6 +155,11 @@ export const leaderboardService = {
       const prevStats = (prev as { stats?: Stats } | null)?.stats;
       const statsChanged = !!stats && (!prevStats || prevStats.firstTry !== stats.firstTry || prevStats.bestStreak !== stats.bestStreak || prevStats.eventWins !== stats.eventWins || prevStats.helpsGiven !== stats.helpsGiven || prevStats.helpsReceived !== stats.helpsReceived);
       const profileChanged = !prev || prev.name !== profile.name || prev.avatar !== profile.avatar || prev.frame !== profile.frame || statsChanged;
+      // Only countrySetAt starts the cooldown (updatedAt moves on every level, so it would never end).
+      const prevCountrySetAt = prev?.countrySetAt?.toMillis?.() ?? null;
+      // A legacy row (country, no countrySetAt) gets its stamp on its next write: the cooldown starts then.
+      const stampLegacyCountry = !!prev?.country && !prev?.countrySetAt;
+      const writeCountry = shouldUpdateCountry(prev?.country, prevCountrySetAt, country, now);
       // suspectCount (any cut claim, kept for support) is not what hides: strikes are (counted
       // from this rule on, so rows marked under the older, looser one are not hidden by it).
       const suspicious = decision.clamped || (decision.first && decision.level >= FIRST_CLAIM_FLAG);
@@ -120,7 +170,7 @@ export const leaderboardService = {
       const freshHigh = decision.first && decision.level >= FIRST_CLAIM_FLAG;
       const hidden = !!prev?.hidden || count >= HIDE_AFTER || freshHigh;
       const hides = hidden && !prev?.hidden;
-      if (rises || profileChanged || strike) {
+      if (rises || profileChanged || strike || writeCountry) {
         const update: Record<string, unknown> = {
           playerId,
           name: profile.name,
@@ -133,6 +183,12 @@ export const leaderboardService = {
         };
         if (rises) update.levelReachedAt = Timestamp.fromMillis(now);
         if (stats) update.stats = stats;
+        if (writeCountry && country) {
+          update.country = country;
+          update.countrySetAt = Timestamp.fromMillis(now);
+        } else if (stampLegacyCountry) {
+          update.countrySetAt = Timestamp.fromMillis(now);
+        }
         if (suspicious) {
           update.suspectCount = FieldValue.increment(1);
           update.lastSuspectAt = Timestamp.fromMillis(now);
@@ -146,6 +202,7 @@ export const leaderboardService = {
     });
     if (result.hides) {
       topCache.clear();
+      hiddenCache.clear();
       logger.warn({ playerId, claimed }, 'leaderboard: row hidden after suspect claims');
     }
     if (result.accepted) {
@@ -155,14 +212,14 @@ export const leaderboardService = {
       // An invited friend reaching the level that counts for their inviter.
       void referralService.onLevel(playerId, result.level).catch((err) => logger.warn({ err, playerId }, 'referral: level not counted'));
     }
-    return { level: result.level, accepted: result.accepted, clamped: result.clamped, first: result.first, previous: result.previous, hidden: result.hidden };
+    return result;
   },
 
   /**
    * One thing against the player from elsewhere (a save richer than possible): counted as a
-   * suspect claim; `hide` hides the row at once. Nothing when the player has no row yet.
+   * suspect claim; `hide` hides the row at once. Returns true if the row transitioned to hidden.
    */
-  async flag(playerId: string, reason: string, hide: boolean): Promise<void> {
+  async flag(playerId: string, reason: string, hide: boolean): Promise<boolean> {
     const ref = col.leaderboard().doc(playerId);
     const hid = await col.leaderboard().firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -175,8 +232,10 @@ export const leaderboardService = {
     });
     if (hid) {
       topCache.clear();
+      hiddenCache.clear();
       logger.warn({ playerId, reason }, 'leaderboard: row hidden');
     }
+    return hid;
   },
 
   /** Whether the player's row is hidden from the others' boards. */
@@ -197,12 +256,14 @@ export const leaderboardService = {
 
   async top(): Promise<Top> {
     return topCache.getOrLoad('world', async () => {
+      const hidden = await this.hiddenEntries().catch(() => [] as HiddenEntry[]);
+      // Size the fetch dynamically so Top 100 stays full even if many hidden rows sit at the top.
+      const fetchLimit = Math.min(400, config.leaderboard.topLimit + Math.max(50, hidden.length + 20));
       const snap = await col
         .leaderboard()
         .orderBy('level', 'desc')
         .orderBy('levelReachedAt', 'asc')
-        // A few over the limit: the hidden ones are left out per viewer (topFor).
-        .limit(config.leaderboard.topLimit + 50)
+        .limit(fetchLimit)
         .select('name', 'avatar', 'frame', 'level', 'team', 'hidden', 'stats')
         .get();
       const rows = snap.docs.map((d, i) => {
@@ -220,6 +281,7 @@ export const leaderboardService = {
     if (!snap.exists) return false;
     await ref.update({ hidden: false, strikes: 0 });
     topCache.clear();
+    hiddenCache.clear();
     rankCache.delete(playerId);
     return true;
   },
@@ -229,26 +291,38 @@ export const leaderboardService = {
       const snap = await col.leaderboard().doc(playerId).get();
       if (!snap.exists) return null;
       const me = snap.data() as BoardEntry;
-      const [above, tiedBefore] = await Promise.all([
+      if (typeof me.level !== 'number' || !me.levelReachedAt) return null;
+      const [above, tiedBefore, hidden] = await Promise.all([
         col.leaderboard().where('level', '>', me.level).count().get(),
         col.leaderboard().where('level', '==', me.level).where('levelReachedAt', '<', me.levelReachedAt).count().get(),
+        me.hidden ? Promise.resolve([] as HiddenEntry[]) : this.hiddenEntries().catch(() => [] as HiddenEntry[]),
       ]);
-      return { rank: above.data().count + tiedBefore.data().count + 1, level: me.level };
+      const meReachedMs = me.levelReachedAt.toMillis();
+      const hiddenAhead = me.hidden
+        ? 0
+        : hidden.filter((h) => h.playerId !== playerId && (h.level > me.level || (h.level === me.level && h.reachedAtMs < meReachedMs))).length;
+      return { rank: Math.max(1, above.data().count + tiedBefore.data().count - hiddenAhead + 1), level: me.level };
     });
   },
 
   async total(): Promise<number> {
-    return totalCache.getOrLoad('all', async () => (await col.leaderboard().count().get()).data().count);
+    return totalCache.getOrLoad('all', async () => {
+      const [raw, hidden] = await Promise.all([col.leaderboard().count().get(), this.hiddenEntries().catch(() => [] as HiddenEntry[])]);
+      return Math.max(0, raw.data().count - hidden.length);
+    });
   },
 
   async remove(playerId: string): Promise<void> {
     await col.leaderboard().doc(playerId).delete();
     rankCache.delete(playerId);
     topCache.clear();
+    hiddenCache.clear();
   },
 
   forgetCaches(): void {
     topCache.clear();
     rankCache.clear();
+    hiddenCache.clear();
+    totalCache.clear();
   },
 };

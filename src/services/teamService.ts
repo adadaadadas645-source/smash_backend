@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import { col, FieldValue, Timestamp } from '../firebase';
+import { col, db, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
+import { runIndexedQuery } from '../utils/indexedQuery';
+import { logger } from '../utils/logger';
 import { TtlCache } from '../utils/ttlCache';
 import { cleanMessage, hidePersonal, isRude, nameIsRude } from './chatFilter';
 import { cleanName, Stats } from './profile';
@@ -10,23 +12,18 @@ import { pushService } from './pushService';
 
 /**
  * Teams: a name, a crest, a short description, who may join (open, or by request: the leader
- * lets them in), the level and crowns a member needs, at most MAX_MEMBERS. Each player is in one
- * team at most. The team's score is its members' levels added up, kept on the team as they
- * change (join, leave, a member's level rising).
+ * or a co-leader lets them in), the level and crowns a member needs, at most MAX_MEMBERS. Each
+ * player is in one team at most. The team's score is its legitimate (non-hidden) members'
+ * levels added up, kept on the team as they change (join, leave, kick, hide, level rise).
  *
  * kingdom_teams/{teamId}                 name, nameLower, description, crest, type, minLevel,
  *                                        minCrowns, members, score, leaderId, createdAt, activeAt
- * kingdom_teams/{teamId}/messages/{id}   kind (text | life | join | leave), playerId, name, avatar,
- *                                        frame, text, helpers[], createdAt
- * kingdom_teams/{teamId}/requests/{pid}  a "by request" team's waiting asker: messageId, level, name, at (the
- *                                        chat card `joinRequest`, the leader's alone, who accepts or declines)
- * kingdom_team_members/{playerId}        teamId, role (leader | coleader | knight), level, helps,
- *                                        name, avatar, frame, joinedAt
- * kingdom_life_inbox/{playerId}          lives (sent by teammates, not taken yet), from[]
- *
- * Asking for a life: once every ASK_LIFE_COOLDOWN_MS, a "life" card in the chat that up to
- * LIFE_HELPS teammates can answer, each once; each answer puts a life in the asker's inbox and
- * gives the helper HELP_COINS coins (the game adds them; the server counts the help).
+ * kingdom_teams/{teamId}/messages/{id}   kind (text | life | coins | join | leave | joinRequest),
+ *                                        playerId, name, avatar, frame, text, helpers[], createdAt
+ * kingdom_teams/{teamId}/requests/{pid}  a "by request" team's waiting asker: messageId, level, name, at
+ * kingdom_team_members/{playerId}        teamId, role (leader | coleader | knight), level,
+ *                                        countedScore, helps, name, avatar, frame, joinedAt
+ * kingdom_life_inbox/{playerId}          lives, coins (sent by teammates, not taken yet)
  */
 export const MAX_MEMBERS = 50;
 export const CREATE_COST = 100;
@@ -35,15 +32,14 @@ export const CREATE_FROM_LEVEL = 80;
 export const LIFE_HELPS = 5;
 export const HELP_COINS = 5;
 export const ASK_LIFE_COOLDOWN_MS = 4 * 60 * 60 * 1000;
-/**
- * Asking for coins: once every ASK_COINS_COOLDOWN_MS, a "coins" card that up to COIN_HELPS
- * teammates answer; each answer puts COIN_GIFT coins in the asker's inbox (the game adds them)
- * and gives the helper HELP_COINS, as a life does.
- */
 export const COIN_HELPS = 5;
 export const COIN_GIFT = 20;
 export const ASK_COINS_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 export const CREST_COUNT = 48;
+/** Daily cap on helps per player (stops leave/rejoin +5 coin farming across open teams). */
+export const MAX_HELPS_PER_DAY = 30;
+/** Daily cap on team creations per player (stops raw-API team spam). */
+export const MAX_TEAM_CREATES_PER_DAY = 3;
 const MESSAGES_KEPT = 60;
 
 export const createSchema = z.object({
@@ -54,6 +50,16 @@ export const createSchema = z.object({
   minLevel: z.number().int().min(0).max(100000).default(0),
   minCrowns: z.number().int().min(0).max(1000000).default(0),
 });
+
+export const editSchema = z
+  .object({
+    description: z.string().max(160).optional(),
+    crest: z.number().int().min(0).max(CREST_COUNT - 1).optional(),
+    type: z.enum(['open', 'request']).optional(),
+    minLevel: z.number().int().min(0).max(100000).optional(),
+    minCrowns: z.number().int().min(0).max(1000000).optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, 'empty_edit');
 
 export type Role = 'leader' | 'coleader' | 'knight';
 
@@ -78,6 +84,8 @@ export interface MemberDoc {
   teamId: string;
   role: Role;
   level: number;
+  /** How much of this member's level is currently counted in the team's score (0 when shadowbanned). */
+  countedScore?: number;
   helps: number;
   name: string;
   avatar: string;
@@ -88,7 +96,7 @@ export interface MemberDoc {
 export interface MessageOut {
   id: string;
   kind: 'text' | 'life' | 'coins' | 'join' | 'leave' | 'joinRequest';
-  /** A join request's state: pending, accepted or declined. */
+  /** A join request's state: pending, accepted, declined or cancelled. */
   status?: string;
   playerId: string;
   name: string;
@@ -99,6 +107,19 @@ export interface MessageOut {
   helpedByMe: boolean;
   mine: boolean;
   at: number;
+}
+
+/** Pure role permission helpers (also unit-tested). */
+export const canAnswerRequest = (role: Role): boolean => role === 'leader' || role === 'coleader';
+export const canEditTeam = (role: Role): boolean => role === 'leader' || role === 'coleader';
+export const canKick = (actor: Role, target: Role): boolean =>
+  (actor === 'leader' && target !== 'leader') || (actor === 'coleader' && target === 'knight');
+
+const todayUtc = () => new Date().toISOString().slice(0, 10);
+
+export function dailyQuotaExceeded(storedDay: unknown, storedCount: unknown, today: string, limit: number): boolean {
+  const n = storedDay === today && typeof storedCount === 'number' ? storedCount : 0;
+  return n >= limit;
 }
 
 /** A team's public face: what the lists and the info page show. */
@@ -114,7 +135,7 @@ export function teamOut(id: string, t: TeamDoc) {
     minCrowns: t.minCrowns,
     members: t.members,
     capacity: MAX_MEMBERS,
-    score: t.score,
+    score: Math.max(0, t.score ?? 0),
     country: t.country ?? null,
     // Activity from the last message or member change: high within a day, medium within a week.
     activity: activeHours < 24 ? 'high' : activeHours < 24 * 7 ? 'medium' : 'low',
@@ -125,9 +146,13 @@ const ROLE_ORDER: Record<Role, number> = { leader: 0, coleader: 1, knight: 2 };
 
 const listCache = new TtlCache<ReturnType<typeof teamOut>[]>(30_000, 60);
 
-/** The team's name on the player's leaderboard row (the boards show it under the player's name). */
-function boardTeam(tx: FirebaseFirestore.Transaction, playerId: string, name: string | null) {
-  tx.set(col.leaderboard().doc(playerId), { team: name ?? FieldValue.delete() }, { merge: true });
+/**
+ * Sets or clears the team name on an EXISTING leaderboard row only.
+ * Never creates a phantom leaderboard document for a player who has not submitted a level yet.
+ */
+function boardTeam(tx: FirebaseFirestore.Transaction, boardSnap: FirebaseFirestore.DocumentSnapshot, name: string | null) {
+  if (!boardSnap.exists) return;
+  tx.update(boardSnap.ref, { team: name ?? FieldValue.delete() });
 }
 
 async function profileOf(playerId: string) {
@@ -135,6 +160,51 @@ async function profileOf(playerId: string) {
   if (!p) throw new AppError(404, 'player_not_found');
   if (p.banned) throw new AppError(403, 'banned');
   return { name: p.name, avatar: p.avatar, frame: p.frame, level: p.level ?? 1 };
+}
+
+/** Cleans up subcollections (requests + messages) and waiting players' pendingTeam after a team is closed. */
+async function cleanupClosedTeam(teamId: string): Promise<void> {
+  const teamRef = col.teams().doc(teamId);
+  try {
+    const reqs = await teamRef.collection('requests').limit(200).get();
+    if (!reqs.empty) {
+      // Only players whose pendingTeam still points at THIS team, and only existing player docs
+      // (update, never set: a deleted account gets no ghost player doc).
+      const players = await db.getAll(...reqs.docs.map((d) => col.players().doc(d.id)));
+      const batch = db.batch();
+      let n = 0;
+      for (const p of players) {
+        if (!p.exists) continue;
+        const pending = p.get('pendingTeam') as { teamId?: string } | undefined;
+        if (pending?.teamId !== teamId) continue;
+        batch.update(p.ref, { pendingTeam: FieldValue.delete() });
+        n++;
+      }
+      if (n > 0) await batch.commit().catch(() => undefined);
+    }
+    await db.recursiveDelete(teamRef);
+  } catch (err) {
+    logger.warn({ err, teamId }, 'team: cleanup of closed team failed');
+  }
+}
+
+/** Every waiting join request of a team: deleted, its chat card marked cancelled, the asker's pendingTeam cleared. */
+async function cancelAllRequests(teamId: string): Promise<number> {
+  const teamRef = col.teams().doc(teamId);
+  const reqs = await teamRef.collection('requests').limit(400).get();
+  if (reqs.empty) return 0;
+  const players = await db.getAll(...reqs.docs.map((d) => col.players().doc(d.id)));
+  const batch = db.batch();
+  for (const d of reqs.docs) {
+    batch.delete(d.ref);
+    const msgId = d.get('messageId') as string | undefined;
+    if (msgId) batch.set(teamRef.collection('messages').doc(msgId), { status: 'cancelled' }, { merge: true });
+  }
+  for (const p of players) {
+    if (p.exists && (p.get('pendingTeam') as { teamId?: string } | undefined)?.teamId === teamId) batch.update(p.ref, { pendingTeam: FieldValue.delete() });
+  }
+  await batch.commit();
+  return reqs.size;
 }
 
 /** A brand-new account may not write yet (a spam bot's first minutes); a player's chat is off; the same words twice in a row are refused. */
@@ -177,12 +247,21 @@ export const teamService = {
         const snap = await col.teams().orderBy('score', 'desc').limit(100).get();
         return snap.docs.map((d) => teamOut(d.id, d.data() as TeamDoc));
       }
-      // One country: no composite index, sorted here.
-      const snap = await col.teams().where('country', '==', cc).limit(1000).get();
-      return snap.docs
-        .map((d) => teamOut(d.id, d.data() as TeamDoc))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 100);
+      const { result } = await runIndexedQuery(
+        'teams_country_score',
+        async () => {
+          const snap = await col.teams().where('country', '==', cc).orderBy('score', 'desc').limit(100).get();
+          return snap.docs.map((d) => teamOut(d.id, d.data() as TeamDoc));
+        },
+        async () => {
+          const snap = await col.teams().where('country', '==', cc).limit(1000).get();
+          return snap.docs
+            .map((d) => teamOut(d.id, d.data() as TeamDoc))
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 100);
+        },
+      );
+      return result;
     });
   },
 
@@ -190,7 +269,7 @@ export const teamService = {
   async search(q: string): Promise<ReturnType<typeof teamOut>[]> {
     const key = cleanName(q).toLocaleLowerCase('tr');
     if (key.length < 2) return [];
-    const snap = await col.teams().where('nameLower', '>=', key).where('nameLower', '<', key + '').limit(20).get();
+    const snap = await col.teams().where('nameLower', '>=', key).where('nameLower', '<', key + '\uf8ff').limit(20).get();
     return snap.docs.map((d) => teamOut(d.id, d.data() as TeamDoc));
   },
 
@@ -206,7 +285,7 @@ export const teamService = {
       .map((d) => {
         const m = d.data() as MemberDoc;
         // A sample team's member (seedService) has no board row: their numbers are on the member.
-        const stats = statsOf.get(d.id) ?? ((m as MemberDoc & { stats?: Stats }).stats);
+        const stats = statsOf.get(d.id) ?? (m as MemberDoc & { stats?: Stats }).stats;
         return { playerId: d.id, name: m.name, avatar: m.avatar, frame: m.frame, role: m.role, level: m.level, helps: m.helps ?? 0, ...(stats ? { stats } : {}) };
       })
       .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || b.level - a.level);
@@ -225,10 +304,20 @@ export const teamService = {
     if (!taken.empty) throw new AppError(409, 'team_name_taken');
     const teamRef = col.teams().doc();
     const now = Timestamp.now();
-    const country = ((await col.leaderboard().doc(playerId).get()).get('country') as string | undefined) ?? null;
+    const today = todayUtc();
     await col.teams().firestore.runTransaction(async (tx) => {
-      const mine = await tx.get(col.teamMembers().doc(playerId));
+      const playerRef = col.players().doc(playerId);
+      const boardRef = col.leaderboard().doc(playerId);
+      const [mine, playerSnap, boardSnap] = await Promise.all([tx.get(col.teamMembers().doc(playerId)), tx.get(playerRef), tx.get(boardRef)]);
       if (mine.exists) throw new AppError(409, 'already_in_team');
+      if (dailyQuotaExceeded(playerSnap.get('teamCreateDay'), playerSnap.get('teamCreateN'), today, MAX_TEAM_CREATES_PER_DAY)) {
+        throw new AppError(429, 'team_create_limit');
+      }
+      const hidden = boardSnap.exists && !!boardSnap.get('hidden');
+      const contrib = hidden ? 0 : me.level;
+      const country = (boardSnap.exists ? (boardSnap.get('country') as string | undefined) : undefined) ?? null;
+      const sameDay = playerSnap.get('teamCreateDay') === today;
+      tx.set(playerRef, { teamCreateDay: today, teamCreateN: sameDay ? ((playerSnap.get('teamCreateN') as number) ?? 0) + 1 : 1, pendingTeam: FieldValue.delete() }, { merge: true });
       tx.create(teamRef, {
         name,
         nameLower,
@@ -238,14 +327,14 @@ export const teamService = {
         minLevel: input.minLevel,
         minCrowns: input.minCrowns,
         members: 1,
-        score: me.level,
+        score: contrib,
         leaderId: playerId,
         country,
         createdAt: now,
         activeAt: now,
       } satisfies TeamDoc);
-      boardTeam(tx, playerId, name);
-      tx.create(col.teamMembers().doc(playerId), { teamId: teamRef.id, role: 'leader', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
+      boardTeam(tx, boardSnap, name);
+      tx.create(col.teamMembers().doc(playerId), { teamId: teamRef.id, role: 'leader', level: me.level, countedScore: contrib, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
     });
     listCache.clear();
     return { id: teamRef.id };
@@ -258,7 +347,15 @@ export const teamService = {
     const now = Timestamp.now();
     const requested = await col.teams().firestore.runTransaction(async (tx) => {
       const reqRef = teamRef.collection('requests').doc(playerId);
-      const [team, mine, waiting] = await Promise.all([tx.get(teamRef), tx.get(col.teamMembers().doc(playerId)), tx.get(reqRef)]);
+      const playerRef = col.players().doc(playerId);
+      const boardRef = col.leaderboard().doc(playerId);
+      const [team, mine, waiting, meDoc, boardSnap] = await Promise.all([
+        tx.get(teamRef),
+        tx.get(col.teamMembers().doc(playerId)),
+        tx.get(reqRef),
+        tx.get(playerRef),
+        tx.get(boardRef),
+      ]);
       if (!team.exists) throw new AppError(404, 'team_not_found');
       if (mine.exists) throw new AppError(409, 'already_in_team');
       const t = team.data() as TeamDoc;
@@ -267,42 +364,68 @@ export const teamService = {
       if (t.type === 'request') {
         // Asked already: it waits as it is.
         if (waiting.exists) return true;
-        // One request at a time: another team's still waiting -> no.
-        const meDoc = await tx.get(col.players().doc(playerId));
-        const pending = meDoc.get('pendingTeam') as { teamId: string } | undefined;
+        // One request at a time: only blocks if BOTH the other team AND its request doc still exist.
+        const pending = meDoc.get('pendingTeam') as { teamId: string; name?: string } | undefined;
         if (pending && pending.teamId !== teamId) {
-          const other = await tx.get(col.teams().doc(pending.teamId).collection('requests').doc(playerId));
-          if (other.exists) throw new AppError(409, 'request_pending', undefined, { team: (meDoc.get('pendingTeam') as { name?: string }).name ?? null });
+          const otherTeamRef = col.teams().doc(pending.teamId);
+          const [otherTeam, otherReq] = await Promise.all([tx.get(otherTeamRef), tx.get(otherTeamRef.collection('requests').doc(playerId))]);
+          if (otherTeam.exists && otherReq.exists) {
+            throw new AppError(409, 'request_pending', undefined, { team: pending.name ?? null });
+          }
         }
-        tx.set(col.players().doc(playerId), { pendingTeam: { teamId, name: t.name, at: now } }, { merge: true });
+        tx.set(playerRef, { pendingTeam: { teamId, name: t.name, at: now } }, { merge: true });
         const msgRef = teamRef.collection('messages').doc();
         tx.create(msgRef, { kind: 'joinRequest', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: `Level ${me.level}`, status: 'pending', helpers: [], createdAt: now });
         tx.create(reqRef, { messageId: msgRef.id, level: me.level, name: me.name, avatar: me.avatar, frame: me.frame, at: now });
         return true;
       }
-      tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(me.level), activeAt: now });
-      boardTeam(tx, playerId, t.name);
-      tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
+      const hidden = boardSnap.exists && !!boardSnap.get('hidden');
+      const contrib = hidden ? 0 : me.level;
+      tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(contrib), activeAt: now });
+      boardTeam(tx, boardSnap, t.name);
+      tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, countedScore: contrib, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId, name: me.name, avatar: me.avatar, frame: me.frame, text: '', helpers: [], createdAt: now });
-      tx.set(col.players().doc(playerId), { pendingTeam: FieldValue.delete() }, { merge: true });
+      tx.set(playerRef, { pendingTeam: FieldValue.delete() }, { merge: true });
       return false;
     });
     if (!requested) listCache.clear();
     return { requested };
   },
 
-  /** The leader answers a join request to their team: in (if there is room), or not. */
+  /** Player cancels their own waiting join request so they are free to apply elsewhere. */
+  async cancelRequest(playerId: string): Promise<{ cancelled: boolean }> {
+    const playerRef = col.players().doc(playerId);
+    const cancelled = await col.teams().firestore.runTransaction(async (tx) => {
+      const meDoc = await tx.get(playerRef);
+      const pending = meDoc.get('pendingTeam') as { teamId?: string } | undefined;
+      if (!pending?.teamId) return false;
+      const teamRef = col.teams().doc(pending.teamId);
+      const reqRef = teamRef.collection('requests').doc(playerId);
+      const req = await tx.get(reqRef);
+      tx.set(playerRef, { pendingTeam: FieldValue.delete() }, { merge: true });
+      if (req.exists) {
+        const msgId = req.get('messageId') as string | undefined;
+        tx.delete(reqRef);
+        if (msgId) tx.set(teamRef.collection('messages').doc(msgId), { status: 'cancelled' }, { merge: true });
+        return true;
+      }
+      return false;
+    });
+    return { cancelled };
+  },
+
+  /** Leader or co-leader answers a join request to their team: in (if there is room), or not. */
   async answerRequest(byId: string, askerId: string, accept: boolean): Promise<{ joined: boolean }> {
     const by = await this.memberOf(byId);
     if (!by) throw new AppError(404, 'not_in_team');
-    // Only the team's leader (the one who made it, or who took the lead after them).
-    if (by.role !== 'leader') throw new AppError(403, 'not_team_leader');
+    if (!canAnswerRequest(by.role)) throw new AppError(403, 'not_team_leader');
     const teamRef = col.teams().doc(by.teamId);
     const reqRef = teamRef.collection('requests').doc(askerId);
     const asker = accept ? await profileOf(askerId) : null;
     const now = Timestamp.now();
     const joined = await col.teams().firestore.runTransaction(async (tx) => {
-      const [req, team, theirs] = await Promise.all([tx.get(reqRef), tx.get(teamRef), tx.get(col.teamMembers().doc(askerId))]);
+      const boardRef = col.leaderboard().doc(askerId);
+      const [req, team, theirs, boardSnap] = await Promise.all([tx.get(reqRef), tx.get(teamRef), tx.get(col.teamMembers().doc(askerId)), tx.get(boardRef)]);
       if (!req.exists) throw new AppError(404, 'request_not_found');
       const msgRef = teamRef.collection('messages').doc(req.get('messageId') as string);
       tx.delete(reqRef);
@@ -315,13 +438,19 @@ export const teamService = {
       }
       const t = team.data() as TeamDoc;
       // In another team meanwhile, or no room: the request goes.
-      if (theirs.exists) { tx.set(msgRef, { status: 'taken' }, { merge: true }); tx.set(col.players().doc(askerId), { pendingTeam: FieldValue.delete() }, { merge: true }); return false; }
+      if (theirs.exists) {
+        tx.set(msgRef, { status: 'taken' }, { merge: true });
+        tx.set(col.players().doc(askerId), { pendingTeam: FieldValue.delete() }, { merge: true });
+        return false;
+      }
       if (t.members >= MAX_MEMBERS) throw new AppError(409, 'team_full');
+      const hidden = boardSnap.exists && !!boardSnap.get('hidden');
+      const contrib = hidden ? 0 : asker!.level;
       tx.set(msgRef, { status: 'accepted' }, { merge: true });
       answer(true);
-      tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(asker!.level), activeAt: now });
-      boardTeam(tx, askerId, t.name);
-      tx.create(col.teamMembers().doc(askerId), { teamId: by.teamId, role: 'knight', level: asker!.level, helps: 0, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, joinedAt: now } satisfies MemberDoc);
+      tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(contrib), activeAt: now });
+      boardTeam(tx, boardSnap, t.name);
+      tx.create(col.teamMembers().doc(askerId), { teamId: by.teamId, role: 'knight', level: asker!.level, countedScore: contrib, helps: 0, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, joinedAt: now } satisfies MemberDoc);
       tx.create(teamRef.collection('messages').doc(), { kind: 'join', playerId: askerId, name: asker!.name, avatar: asker!.avatar, frame: asker!.frame, text: '', helpers: [], createdAt: now });
       return true;
     });
@@ -329,54 +458,182 @@ export const teamService = {
     return { joined };
   },
 
-  /** Leaving: the last member out closes the team; a leader leaving hands the lead to the highest member. */
+  /** Leaving: the last member out closes the team; a leader leaving hands the lead to the highest active member inside the transaction. */
   async leave(playerId: string) {
     const memberRef = col.teamMembers().doc(playerId);
     const mine = await memberRef.get();
     if (!mine.exists) throw new AppError(404, 'not_in_team');
-    const m = mine.data() as MemberDoc;
-    const teamRef = col.teams().doc(m.teamId);
-    let heir: string | null = null;
-    if (m.role === 'leader') {
-      const others = await col.teamMembers().where('teamId', '==', m.teamId).limit(MAX_MEMBERS).get();
-      const next = others.docs
+    const pre = mine.data() as MemberDoc;
+    const teamRef = col.teams().doc(pre.teamId);
+    const now = Timestamp.now();
+    let closedTeamId: string | null = null;
+    // Candidate heirs are read outside, their live membership checked inside the transaction.
+    // First try: the best 5 (only when a leader leaves). If none is still in the team (they all left
+    // meanwhile, or this player became leader meanwhile), retry with every member; only when no
+    // other live member is found at all does the team close, so it is never left leaderless and
+    // never deleted under members still in it.
+    const fetchCandidates = async (all: boolean): Promise<{ ids: string[]; complete: boolean }> => {
+      const others = await col.teamMembers().where('teamId', '==', pre.teamId).limit(MAX_MEMBERS).get();
+      const sorted = others.docs
         .filter((d) => d.id !== playerId)
         .map((d) => ({ id: d.id, m: d.data() as MemberDoc }))
-        .sort((a, b) => ROLE_ORDER[a.m.role] - ROLE_ORDER[b.m.role] || b.m.level - a.m.level)[0];
-      heir = next?.id ?? null;
+        .sort((a, b) => ROLE_ORDER[a.m.role] - ROLE_ORDER[b.m.role] || b.m.level - a.m.level)
+        .map((x) => x.id);
+      return { ids: all ? sorted : sorted.slice(0, 5), complete: all || sorted.length <= 5 };
+    };
+    const NEED_ALL = 'leave_need_all_candidates';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const last = attempt === 1;
+      const fetched = pre.role === 'leader' || last ? await fetchCandidates(last) : { ids: [], complete: false };
+      const candidateIds = fetched.ids;
+      try {
+        await col.teams().firestore.runTransaction(async (tx) => {
+          const boardRef = col.leaderboard().doc(playerId);
+          const [liveMine, team, boardSnap, ...heirSnaps] = await Promise.all([
+            tx.get(memberRef),
+            tx.get(teamRef),
+            tx.get(boardRef),
+            ...candidateIds.map((id) => tx.get(col.teamMembers().doc(id))),
+          ]);
+          if (!liveMine.exists) throw new AppError(404, 'not_in_team');
+          const m = liveMine.data() as MemberDoc;
+          if (!team.exists) {
+            tx.delete(memberRef);
+            boardTeam(tx, boardSnap, null);
+            return;
+          }
+          const t = team.data() as TeamDoc;
+          const validHeir = m.role === 'leader' ? heirSnaps.find((s) => s.exists && s.get('teamId') === m.teamId) : undefined;
+          // A leader with no live heir among a partial list: look at everyone before deciding.
+          if (m.role === 'leader' && !validHeir && !fetched.complete) throw new Error(NEED_ALL);
+          const newMembers = Math.max(0, t.members - 1);
+          const othersRemain = m.role === 'leader' ? !!validHeir : newMembers > 0;
+          tx.delete(memberRef);
+          boardTeam(tx, boardSnap, null);
+          if (!othersRemain) {
+            tx.delete(teamRef);
+            closedTeamId = m.teamId;
+            return;
+          }
+          const sub = Math.max(0, m.countedScore ?? m.level ?? 0);
+          const update: Record<string, unknown> = { members: Math.max(1, newMembers), score: Math.max(0, (t.score ?? 0) - sub), activeAt: now };
+          if (validHeir) {
+            update.leaderId = validHeir.id;
+            tx.update(validHeir.ref, { role: 'leader' });
+          }
+          tx.update(teamRef, update);
+          tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId, name: m.name, avatar: m.avatar, frame: m.frame, text: '', helpers: [], createdAt: now });
+        });
+        break;
+      } catch (err) {
+        if (err instanceof Error && err.message === NEED_ALL && !last) continue;
+        throw err;
+      }
     }
+    listCache.clear();
+    if (closedTeamId) void cleanupClosedTeam(closedTeamId);
+  },
+
+  /** Leader (kicks coleader/knight) or co-leader (kicks knight) removes a member from the team. */
+  async kick(byId: string, targetId: string): Promise<void> {
+    if (byId === targetId) throw new AppError(400, 'cannot_kick_self');
+    const byRef = col.teamMembers().doc(byId);
+    const targetRef = col.teamMembers().doc(targetId);
+    const byPre = await byRef.get();
+    if (!byPre.exists) throw new AppError(404, 'not_in_team');
+    const teamId = byPre.get('teamId') as string;
+    const teamRef = col.teams().doc(teamId);
     const now = Timestamp.now();
     await col.teams().firestore.runTransaction(async (tx) => {
-      const team = await tx.get(teamRef);
-      tx.delete(memberRef);
-      boardTeam(tx, playerId, null);
-      if (!team.exists) return;
-      const t = team.data() as TeamDoc;
-      if (t.members <= 1) {
-        tx.delete(teamRef);
-        return;
+      const targetBoardRef = col.leaderboard().doc(targetId);
+      const [bySnap, targetSnap, teamSnap, targetBoardSnap] = await Promise.all([tx.get(byRef), tx.get(targetRef), tx.get(teamRef), tx.get(targetBoardRef)]);
+      if (!bySnap.exists) throw new AppError(404, 'not_in_team');
+      const actor = bySnap.data() as MemberDoc;
+      if (!targetSnap.exists || targetSnap.get('teamId') !== actor.teamId) throw new AppError(404, 'member_not_found');
+      const target = targetSnap.data() as MemberDoc;
+      if (!canKick(actor.role, target.role)) throw new AppError(403, 'insufficient_role');
+      tx.delete(targetRef);
+      boardTeam(tx, targetBoardSnap, null);
+      if (teamSnap.exists) {
+        const t = teamSnap.data() as TeamDoc;
+        const sub = Math.max(0, target.countedScore ?? target.level ?? 0);
+        tx.update(teamRef, { members: Math.max(1, t.members - 1), score: Math.max(0, (t.score ?? 0) - sub), activeAt: now });
+        tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId: targetId, name: target.name, avatar: target.avatar, frame: target.frame, text: '', helpers: [], createdAt: now });
       }
-      const update: Record<string, unknown> = { members: FieldValue.increment(-1), score: FieldValue.increment(-(m.level ?? 0)), activeAt: now };
-      if (heir) {
-        update.leaderId = heir;
-        tx.update(col.teamMembers().doc(heir), { role: 'leader' });
-      }
-      tx.update(teamRef, update);
-      tx.create(teamRef.collection('messages').doc(), { kind: 'leave', playerId, name: m.name, avatar: m.avatar, frame: m.frame, text: '', helpers: [], createdAt: now });
     });
     listCache.clear();
   },
 
-  /** The last messages of the player's team, oldest first, and whether a life may be asked for. */
+  /** Leader promotes/demotes a member (`coleader` | `knight`) or transfers leadership (`leader`). */
+  async setRole(byId: string, targetId: string, role: Role): Promise<{ role: Role }> {
+    if (byId === targetId) throw new AppError(400, 'cannot_change_own_role');
+    const byRef = col.teamMembers().doc(byId);
+    const targetRef = col.teamMembers().doc(targetId);
+    const byPre = await byRef.get();
+    if (!byPre.exists) throw new AppError(404, 'not_in_team');
+    const teamId = byPre.get('teamId') as string;
+    const teamRef = col.teams().doc(teamId);
+    await col.teams().firestore.runTransaction(async (tx) => {
+      const [bySnap, targetSnap, teamSnap] = await Promise.all([tx.get(byRef), tx.get(targetRef), tx.get(teamRef)]);
+      if (!bySnap.exists) throw new AppError(404, 'not_in_team');
+      const actor = bySnap.data() as MemberDoc;
+      if (actor.role !== 'leader') throw new AppError(403, 'not_team_leader');
+      if (!targetSnap.exists || targetSnap.get('teamId') !== actor.teamId) throw new AppError(404, 'member_not_found');
+      if (!teamSnap.exists) throw new AppError(404, 'team_not_found');
+      if (role === 'leader') {
+        tx.update(byRef, { role: 'coleader' });
+        tx.update(targetRef, { role: 'leader' });
+        tx.update(teamRef, { leaderId: targetId });
+      } else {
+        tx.update(targetRef, { role });
+      }
+    });
+    return { role };
+  },
+
+  /** Leader or co-leader edits description, crest, join type, minLevel or minCrowns. */
+  async edit(byId: string, input: z.infer<typeof editSchema>) {
+    const by = await this.memberOf(byId);
+    if (!by) throw new AppError(404, 'not_in_team');
+    if (!canEditTeam(by.role)) throw new AppError(403, 'not_team_leader');
+    const update: Record<string, unknown> = {};
+    if (input.description !== undefined) {
+      if (input.description.split(/\s+/).some((w) => isRude(w)) || hidePersonal(input.description) !== input.description) {
+        throw new AppError(400, 'team_description_rude');
+      }
+      update.description = cleanMessage(input.description).slice(0, 160);
+    }
+    if (input.crest !== undefined) update.crest = input.crest;
+    if (input.type !== undefined) update.type = input.type;
+    if (input.minLevel !== undefined) update.minLevel = input.minLevel;
+    if (input.minCrowns !== undefined) update.minCrowns = input.minCrowns;
+    const teamRef = col.teams().doc(by.teamId);
+    try {
+      await teamRef.update(update);
+    } catch (err) {
+      // The team was closed meanwhile (gRPC 5 NOT_FOUND): a 404, not a 500.
+      if ((err as { code?: unknown })?.code === 5) throw new AppError(404, 'team_not_found');
+      throw err;
+    }
+    listCache.clear();
+    const fresh = await teamRef.get();
+    return { team: teamOut(fresh.id, fresh.data() as TeamDoc) };
+  },
+
+  /** The last messages of the player's team, oldest first, and whether a life/coins may be asked for. */
   async messages(playerId: string) {
     const m = await this.memberOf(playerId);
     if (!m) throw new AppError(404, 'not_in_team');
-    const snap = await col.teams().doc(m.teamId).collection('messages').orderBy('createdAt', 'desc').limit(MESSAGES_KEPT).get();
-    // A join request's card is the leader's alone (they answer it); the others see the "joined" line after.
-    const [blocked, meDoc] = await Promise.all([safetyService.blocked(playerId), col.players().doc(playerId).get()]);
+    const [snap, blocked, meDoc, inbox] = await Promise.all([
+      col.teams().doc(m.teamId).collection('messages').orderBy('createdAt', 'desc').limit(MESSAGES_KEPT).get(),
+      safetyService.blocked(playerId),
+      col.players().doc(playerId).get(),
+      col.lifeInbox().doc(playerId).get(),
+    ]);
     const chatOff = !!meDoc.get('chatOff');
+    const canSeeRequests = canAnswerRequest(m.role);
     const rows: MessageOut[] = snap.docs
-      .filter((d) => d.get('kind') !== 'joinRequest' || m.role === 'leader')
+      .filter((d) => d.get('kind') !== 'joinRequest' || canSeeRequests)
       // A blocked player's words never show (on any device); with chat off, no one else's words do.
       .filter((d) => d.get('playerId') === playerId || !blocked.includes(d.get('playerId')))
       .filter((d) => !chatOff || d.get('kind') !== 'text' || d.get('playerId') === playerId)
@@ -399,10 +656,8 @@ export const teamService = {
         } satisfies MessageOut;
       })
       .reverse();
-    const me = await col.players().doc(playerId).get();
-    const askAt = (me.get('askLifeAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
-    const coinsAt = (me.get('askCoinsAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
-    const inbox = await col.lifeInbox().doc(playerId).get();
+    const askAt = (meDoc.get('askLifeAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
+    const coinsAt = (meDoc.get('askCoinsAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis() ?? 0;
     return {
       teamId: m.teamId,
       role: m.role,
@@ -459,14 +714,16 @@ export const teamService = {
     });
   },
 
-  /** Answering a teammate's life (or coins) card: a life (or COIN_GIFT coins) into their inbox, the helper's help counted. */
+  /** Answering a teammate's life (or coins) card: daily help cap + asker must still be in the team. */
   async help(playerId: string, messageId: string) {
     const m = await this.memberOf(playerId);
     if (!m) throw new AppError(404, 'not_in_team');
     const msgRef = col.teams().doc(m.teamId).collection('messages').doc(messageId);
+    const mePlayerRef = col.players().doc(playerId);
+    const today = todayUtc();
     let sent: { asker: string; kind: string } | null = null;
     await col.teams().firestore.runTransaction(async (tx) => {
-      const msg = await tx.get(msgRef);
+      const [msg, meDoc] = await Promise.all([tx.get(msgRef), tx.get(mePlayerRef)]);
       const kind = msg.exists ? (msg.get('kind') as string) : '';
       if (kind !== 'life' && kind !== 'coins') throw new AppError(404, 'message_not_found');
       const asker = msg.get('playerId') as string;
@@ -474,6 +731,14 @@ export const teamService = {
       if (asker === playerId) throw new AppError(400, 'own_request');
       if (helpers.includes(playerId)) throw new AppError(409, 'already_helped');
       if (helpers.length >= (kind === 'coins' ? COIN_HELPS : LIFE_HELPS)) throw new AppError(409, 'request_full');
+      if (dailyQuotaExceeded(meDoc.get('helpDay'), meDoc.get('helpN'), today, MAX_HELPS_PER_DAY)) {
+        throw new AppError(429, 'help_limit_today');
+      }
+      // Asker must still belong to this team (prevents farming old cards after leaving).
+      const askerMember = await tx.get(col.teamMembers().doc(asker));
+      if (!askerMember.exists || askerMember.get('teamId') !== m.teamId) throw new AppError(404, 'message_not_found');
+      const sameDay = meDoc.get('helpDay') === today;
+      tx.set(mePlayerRef, { helpDay: today, helpN: sameDay ? ((meDoc.get('helpN') as number) ?? 0) + 1 : 1 }, { merge: true });
       tx.update(msgRef, { helpers: FieldValue.arrayUnion(playerId) });
       const gift = kind === 'coins' ? { coins: FieldValue.increment(COIN_GIFT) } : { lives: FieldValue.increment(1) };
       tx.set(col.lifeInbox().doc(asker), { ...gift, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
@@ -530,15 +795,133 @@ export const teamService = {
     });
   },
 
-  /** A member's level rose: the team's score and the member's row follow. */
+  /** A non-hidden member's level rose: the team's score and the member's row follow atomically. */
   async onLevel(playerId: string, level: number) {
     const ref = col.teamMembers().doc(playerId);
-    const snap = await ref.get();
-    if (!snap.exists) return;
-    const m = snap.data() as MemberDoc;
-    const delta = level - (m.level ?? 0);
-    if (delta <= 0) return;
-    // A member playing keeps the team active (its Activity: high within a day of a level won).
-    await Promise.all([ref.update({ level }), col.teams().doc(m.teamId).update({ score: FieldValue.increment(delta), activeAt: Timestamp.now() })]);
+    await col.teamMembers().firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return;
+      const m = snap.data() as MemberDoc;
+      const prevCounted = m.countedScore ?? m.level ?? 0;
+      const delta = level - prevCounted;
+      if (delta <= 0 && level <= (m.level ?? 0)) return;
+      const teamRef = col.teams().doc(m.teamId);
+      const teamSnap = await tx.get(teamRef);
+      tx.update(ref, { level: Math.max(level, m.level ?? 0), countedScore: Math.max(level, prevCounted) });
+      if (teamSnap.exists && delta > 0) {
+        tx.update(teamRef, { score: FieldValue.increment(delta), activeAt: Timestamp.now() });
+      }
+    });
+  },
+
+  /** Called when a player transitions to shadowbanned: subtracts their contribution from their team's score. */
+  async onHidden(playerId: string): Promise<void> {
+    const ref = col.teamMembers().doc(playerId);
+    const changed = await col.teamMembers().firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return false;
+      const m = snap.data() as MemberDoc;
+      const sub = Math.max(0, m.countedScore ?? m.level ?? 0);
+      if (sub === 0 && m.countedScore === 0) return false;
+      const teamRef = col.teams().doc(m.teamId);
+      const teamSnap = await tx.get(teamRef);
+      tx.update(ref, { countedScore: 0 });
+      if (teamSnap.exists && sub > 0) {
+        const cur = (teamSnap.get('score') as number) ?? 0;
+        tx.update(teamRef, { score: Math.max(0, cur - sub) });
+      }
+      return true;
+    });
+    if (changed) listCache.clear();
+  },
+
+  /** Called when a hidden player is shown again (admin unhide): their level counts for the team again. */
+  async onUnhidden(playerId: string): Promise<void> {
+    const ref = col.teamMembers().doc(playerId);
+    const changed = await col.teamMembers().firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return false;
+      const m = snap.data() as MemberDoc;
+      const level = Math.max(0, m.level ?? 0);
+      const counted = m.countedScore ?? level;
+      const add = level - counted;
+      if (add <= 0) return false;
+      const teamRef = col.teams().doc(m.teamId);
+      const teamSnap = await tx.get(teamRef);
+      tx.update(ref, { countedScore: level });
+      if (teamSnap.exists) tx.update(teamRef, { score: FieldValue.increment(add) });
+      return true;
+    });
+    if (changed) listCache.clear();
+  },
+
+  /**
+   * One-off repair (admin): every team's score recounted from its members, a hidden member
+   * (leaderboard row `hidden`) counting 0, and each member's countedScore written to match.
+   * Fixes teams whose hidden members were counted before countedScore existed.
+   */
+  async recountScores(): Promise<{ teams: number; teamsChanged: number; membersChanged: number; seedOpened: number }> {
+    let teams = 0;
+    let seedOpened = 0;
+    let teamsChanged = 0;
+    let membersChanged = 0;
+    let last: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+    for (;;) {
+      let q = col.teams().orderBy('__name__').limit(100);
+      if (last) q = q.startAfter(last);
+      const page = await q.get();
+      if (page.empty) break;
+      for (const teamDoc of page.docs) {
+        teams++;
+        const members = await col.teamMembers().where('teamId', '==', teamDoc.id).limit(MAX_MEMBERS).get();
+        const boards = members.empty ? [] : await db.getAll(...members.docs.map((d) => col.leaderboard().doc(d.id)));
+        const hiddenIds = new Set(boards.filter((b) => b.exists && b.get('hidden')).map((b) => b.id));
+        const batch = db.batch();
+        let writes = 0;
+        let score = 0;
+        for (const d of members.docs) {
+          const m = d.data() as MemberDoc;
+          const counted = hiddenIds.has(d.id) ? 0 : Math.max(0, m.level ?? 0);
+          score += counted;
+          if (m.countedScore !== counted) {
+            batch.update(d.ref, { countedScore: counted });
+            writes++;
+            membersChanged++;
+          }
+        }
+        const t = teamDoc.data() as TeamDoc;
+        const teamUpdate: Record<string, unknown> = {};
+        if (t.score !== score) teamUpdate.score = score;
+        if (members.size > 0 && t.members !== members.size) teamUpdate.members = members.size;
+        // Sample teams (seedService, ids seed_…) stay, always open: no real leader answers requests.
+        if (teamDoc.id.startsWith('seed_') && t.type !== 'open') {
+          teamUpdate.type = 'open';
+          seedOpened++;
+        }
+        if (Object.keys(teamUpdate).length > 0) {
+          batch.update(teamDoc.ref, teamUpdate);
+          writes++;
+          teamsChanged++;
+        }
+        if (writes > 0) await batch.commit();
+        // A sample team's waiting join requests (from when it was "by request") would never be
+        // answered: they go, the cards say cancelled, the askers are free to apply elsewhere.
+        if (teamDoc.id.startsWith('seed_')) await cancelAllRequests(teamDoc.id);
+      }
+      last = page.docs[page.docs.length - 1];
+      if (page.size < 100) break;
+    }
+    listCache.clear();
+    return { teams, teamsChanged, membersChanged, seedOpened };
+  },
+
+  /** Called after a player's first leaderboard row is created: attaches their current team name if in one. */
+  async syncBoardTeam(playerId: string): Promise<void> {
+    const m = await this.memberOf(playerId);
+    if (!m) return;
+    const team = await col.teams().doc(m.teamId).get();
+    if (!team.exists) return;
+    const name = team.get('name') as string | undefined;
+    if (name) await col.leaderboard().doc(playerId).update({ team: name }).catch(() => undefined);
   },
 };

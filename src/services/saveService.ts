@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import { currentContext } from '../utils/context';
 import { logSecurityEvent, logger } from '../utils/logger';
 import { leaderboardService } from './leaderboardService';
+import { teamService } from './teamService';
 import { dbLog } from './logStore';
 
 /**
@@ -112,7 +113,11 @@ export const saveService = {
       const data = { coins: sum.coins, level: sum.level, purchasedCoins: bought, rev: input.rev };
       logSecurityEvent('save_rejected', { playerId, ...data });
       dbLog.security('save_rejected', data, playerId);
-      await leaderboardService.flag(playerId, 'save_coins_impossible', true).catch((err) => logger.warn({ err, playerId }, 'save: flag failed'));
+      const hid = await leaderboardService.flag(playerId, 'save_coins_impossible', true).catch((err) => {
+        logger.warn({ err, playerId }, 'save: flag failed');
+        return false;
+      });
+      if (hid) void teamService.onHidden(playerId).catch((err) => logger.warn({ err, playerId }, 'save: team score cleanup failed'));
       throw new AppError(422, 'save_rejected');
     }
     const ref = col.saves().doc(playerId);

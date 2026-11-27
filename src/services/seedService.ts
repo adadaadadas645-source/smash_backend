@@ -165,7 +165,8 @@ export const seedService = {
             nameLower: name.toLocaleLowerCase('tr'),
             description: pick(c.descriptions, h('desc')),
             crest: h('crest') % CREST_COUNT,
-            type: size === FULL ? pick(['open', 'request'], h('type')) : 'open',
+            // Always open: a sample team has no real leader to answer a join request.
+            type: 'open',
             minLevel,
             minCrowns: 0,
             members: size,

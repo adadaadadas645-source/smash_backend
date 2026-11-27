@@ -182,6 +182,9 @@ for f in playerId requestId kind name; do
 done
 ```
 
+Ülke sıralaması, haftalık yarış, ülke takımları ve turnuva geçmişinin indeksleri (yoksa sunucu
+yavaş sorguya düşer, hata vermez) ve hepsi birden: `./scripts/create-indexes.sh`.
+
 Unutulan bir indeks olursa Render logunda `FAILED_PRECONDITION … create it here: https://console.firebase.google.com/…`
 satırı çıkar. O bağlantıya tıklamak da indeksi kurar.
 

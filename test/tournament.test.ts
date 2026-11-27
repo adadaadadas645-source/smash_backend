@@ -12,6 +12,7 @@ import {
   prizeFor,
   rank,
   scheduleFromEnv,
+  shadowGroupOf,
   windowAt,
   windowOfId,
 } from '../src/services/tournamentRules';
@@ -84,4 +85,18 @@ test('prizeFor: the first only', () => {
   assert.equal(prizeFor(2), null);
   assert.equal(prizeFor(4), null);
   assert.equal(prizeFor(0), null);
+});
+
+test('shadowGroupOf: always negative, deterministic, never collides with real groups, bots work cleanly', () => {
+  const w = windowAt(at('2026-11-25T10:05:00Z'), s)!;
+  const g1 = shadowGroupOf(w.id, 'p_cheater_1');
+  const g2 = shadowGroupOf(w.id, 'p_cheater_2');
+  assert.ok(g1 < 0 && Number.isInteger(g1));
+  assert.ok(g2 < 0 && Number.isInteger(g2));
+  assert.equal(g1, shadowGroupOf(w.id, 'p_cheater_1'));
+  assert.notEqual(g1, g2);
+  // Bots in negative shadow groups generate valid deterministic scores.
+  const b = botOf(w.id, g1, 0);
+  assert.ok(b.name.length > 0 && b.pace >= 95);
+  assert.ok(botPoints(b, w, w.endsAt) > 0);
 });

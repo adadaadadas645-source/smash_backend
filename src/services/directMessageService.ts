@@ -172,22 +172,24 @@ export const directMessageService = {
    */
   async inbox(me: string, since: number) {
     const after = Number.isFinite(since) && since > 0 ? since : Date.now() - 24 * 3600_000;
-    const [asA, asB, reqs] = await Promise.all([
-      threads().where('a', '==', me).limit(200).get(),
-      threads().where('b', '==', me).limit(200).get(),
+    const [asA, asB, reqs, meDoc, member, blockedList] = await Promise.all([
+      DM_ENABLED ? threads().where('a', '==', me).limit(200).get() : Promise.resolve(null),
+      DM_ENABLED ? threads().where('b', '==', me).limit(200).get() : Promise.resolve(null),
       col.friends().where('owner', '==', me).where('status', '==', 'incoming').limit(50).get(),
+      col.players().doc(me).get(),
+      col.teamMembers().doc(me).get(),
+      safetyService.blocked(me),
     ]);
-    const meDoc = await col.players().doc(me).get();
-    // The leader of a "by request" team: who asked to join it.
-    const member = await col.teamMembers().doc(me).get();
+    // Leaders and co-leaders of a "by request" team: who asked to join it.
+    const role = member.exists ? (member.get('role') as string) : '';
     const teamAsks =
-      member.exists && member.get('role') === 'leader'
+      role === 'leader' || role === 'coleader'
         ? (await col.teams().doc(member.get('teamId') as string).collection('requests').limit(50).get()).docs
             .map((d) => ({ playerId: d.id, name: (d.get('name') as string) ?? 'A player', avatar: (d.get('avatar') as string) ?? 'leo', frame: (d.get('frame') as string) ?? 'gold', at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
             .filter((r) => r.at > after)
         : [];
-    const blocked = new Set(await safetyService.blocked(me));
-    const words = (DM_ENABLED ? [...asA.docs, ...asB.docs] : [])
+    const blocked = new Set(blockedList);
+    const words = (DM_ENABLED && asA && asB ? [...asA.docs, ...asB.docs] : [])
       .filter((t) => t.get('lastFrom') && t.get('lastFrom') !== me && ((t.get('lastAt') as number) ?? 0) > after)
       .map((t) => ({ playerId: t.get('lastFrom') as string, text: (t.get('lastText') as string) ?? '', at: t.get('lastAt') as number }));
     const requests = reqs.docs

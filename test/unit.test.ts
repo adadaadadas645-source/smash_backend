@@ -10,7 +10,9 @@ import { test } from 'node:test';
 import { jwsPayload } from '../src/services/appStore';
 import { findProduct } from '../src/services/catalog';
 import { transactionIdOf } from '../src/services/iosPurchaseService';
-import { allowedLevel, claimSuspect, HIDE_AFTER, MAX_STEP } from '../src/services/leaderboardService';
+import { allowedLevel, claimSuspect, COUNTRY_CHANGE_COOLDOWN_MS, HIDE_AFTER, MAX_STEP, shouldUpdateCountry } from '../src/services/leaderboardService';
+import { canAnswerRequest, canEditTeam, canKick, dailyQuotaExceeded, MAX_HELPS_PER_DAY, MAX_TEAM_CREATES_PER_DAY } from '../src/services/teamService';
+import { isMissingIndexError, resetIndexFallbacks, runIndexedQuery } from '../src/utils/indexedQuery';
 import { coinsImpossible } from '../src/services/saveService';
 import { cleanMessage, isRude } from '../src/services/chatFilter';
 import { cleanName } from '../src/services/profile';
@@ -271,4 +273,127 @@ test('visibleTo with no viewer: the hidden left out of the places (last week\'s 
     { rank: 4, playerId: 'c', points: 30 },
   ];
   assert.deepEqual(visibleTo(rows, '').map((r) => [r.playerId, r.rank]), [['a', 1], ['b', 2], ['c', 3]]);
+});
+
+// ── Anti-exploit, country cooldown, team roles & indexed-query fallback ───────
+
+test('shouldUpdateCountry: sets first country, skips unchanged, enforces 30-day cooldown', () => {
+  const t0 = 1_700_000_000_000;
+  // First assignment allowed
+  assert.equal(shouldUpdateCountry(null, null, 'TR', t0), true);
+  // Same country skipped (saves a Firestore write)
+  assert.equal(shouldUpdateCountry('TR', t0, 'TR', t0 + 1000), false);
+  // Invalid country code rejected
+  assert.equal(shouldUpdateCountry(null, null, '', t0), false);
+  assert.equal(shouldUpdateCountry(null, null, 'tr', t0), false);
+  assert.equal(shouldUpdateCountry(null, null, 'TUR', t0), false);
+  // Switching country within 30-day cooldown blocked (anti locale-spoofing)
+  assert.equal(shouldUpdateCountry('TR', t0, 'US', t0 + 86_400_000), false);
+  assert.equal(shouldUpdateCountry('TR', t0, 'US', t0 + COUNTRY_CHANGE_COOLDOWN_MS - 1), false);
+  // Legacy row with country but no timestamp stays locked (prevents immediate spoofing)
+  assert.equal(shouldUpdateCountry('TR', null, 'US', t0), false);
+  // Switching after cooldown allowed
+  assert.equal(shouldUpdateCountry('TR', t0, 'US', t0 + COUNTRY_CHANGE_COOLDOWN_MS), true);
+});
+
+test('team permissions: leader vs coleader vs knight matrix', () => {
+  assert.equal(canEditTeam('leader'), true);
+  assert.equal(canEditTeam('coleader'), true);
+  assert.equal(canEditTeam('knight'), false);
+
+  assert.equal(canAnswerRequest('leader'), true);
+  assert.equal(canAnswerRequest('coleader'), true);
+  assert.equal(canAnswerRequest('knight'), false);
+
+  assert.equal(canKick('leader', 'coleader'), true);
+  assert.equal(canKick('leader', 'knight'), true);
+  assert.equal(canKick('leader', 'leader'), false);
+  assert.equal(canKick('coleader', 'knight'), true);
+  assert.equal(canKick('coleader', 'coleader'), false);
+  assert.equal(canKick('coleader', 'leader'), false);
+  assert.equal(canKick('knight', 'knight'), false);
+});
+
+test('dailyQuotaExceeded: enforces daily help & team creation caps and resets next UTC day', () => {
+  assert.ok(MAX_HELPS_PER_DAY >= 10);
+  assert.ok(MAX_TEAM_CREATES_PER_DAY >= 1);
+  assert.equal(dailyQuotaExceeded('2026-11-27', 0, '2026-11-27', MAX_HELPS_PER_DAY), false);
+  assert.equal(dailyQuotaExceeded('2026-11-27', MAX_HELPS_PER_DAY - 1, '2026-11-27', MAX_HELPS_PER_DAY), false);
+  assert.equal(dailyQuotaExceeded('2026-11-27', MAX_HELPS_PER_DAY, '2026-11-27', MAX_HELPS_PER_DAY), true);
+  // New day resets quota
+  assert.equal(dailyQuotaExceeded('2026-11-26', MAX_HELPS_PER_DAY, '2026-11-27', MAX_HELPS_PER_DAY), false);
+  assert.equal(dailyQuotaExceeded(undefined, undefined, '2026-11-27', MAX_TEAM_CREATES_PER_DAY), false);
+});
+
+test('runIndexedQuery: uses indexed query, falls back cleanly on missing index with cooldown, rethrows real errors', async () => {
+  resetIndexFallbacks();
+  assert.equal(isMissingIndexError({ code: 9, message: 'FAILED_PRECONDITION: The query requires an index.' }), true);
+  assert.equal(isMissingIndexError({ code: 'failed-precondition', message: 'requires an index' }), true);
+  assert.equal(isMissingIndexError(new Error('network timeout')), false);
+
+  // Happy path: indexed succeeds, fallback never called
+  let fallbackCalls = 0;
+  const r1 = await runIndexedQuery(
+    'test_ok',
+    async () => 'indexed',
+    async () => {
+      fallbackCalls++;
+      return 'fallback';
+    },
+  );
+  assert.deepEqual(r1, { result: 'indexed', usedFallback: false });
+  assert.equal(fallbackCalls, 0);
+
+  // Missing index: falls back AND skips indexed during 5-minute cooldown
+  let indexedCalls = 0;
+  const t0 = 1_700_000_000_000;
+  const r2 = await runIndexedQuery(
+    'test_missing',
+    async () => {
+      indexedCalls++;
+      throw Object.assign(new Error('9 FAILED_PRECONDITION: The query requires an index'), { code: 9 });
+    },
+    async () => 'fallback-1',
+    t0,
+  );
+  assert.deepEqual(r2, { result: 'fallback-1', usedFallback: true });
+  assert.equal(indexedCalls, 1);
+
+  const r3 = await runIndexedQuery(
+    'test_missing',
+    async () => {
+      indexedCalls++;
+      return 'indexed-too-early';
+    },
+    async () => 'fallback-2',
+    t0 + 60_000,
+  );
+  assert.deepEqual(r3, { result: 'fallback-2', usedFallback: true });
+  assert.equal(indexedCalls, 1);
+
+  // After cooldown expires, retries indexed query and succeeds
+  const r4 = await runIndexedQuery(
+    'test_missing',
+    async () => {
+      indexedCalls++;
+      return 'indexed-ready';
+    },
+    async () => 'fallback-3',
+    t0 + 6 * 60_000,
+  );
+  assert.deepEqual(r4, { result: 'indexed-ready', usedFallback: false });
+  assert.equal(indexedCalls, 2);
+
+  // Non-index error is rethrown, never swallowed
+  await assert.rejects(
+    runIndexedQuery(
+      'test_err',
+      async () => {
+        throw new Error('permission_denied');
+      },
+      async () => 'should-not-run',
+    ),
+    /permission_denied/,
+  );
+  resetIndexFallbacks();
 });

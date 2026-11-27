@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { col, db, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
+import { runIndexedQuery } from '../utils/indexedQuery';
 import { TtlCache } from '../utils/ttlCache';
 import { leaderboardService } from './leaderboardService';
 import { playerService } from './playerService';
@@ -17,6 +18,7 @@ import {
   PRIZES,
   rank,
   scheduleFromEnv,
+  shadowGroupOf,
   Standing,
   Window,
   windowAt,
@@ -127,7 +129,11 @@ function view(rows: Awaited<ReturnType<typeof standings>>, me: string) {
 
 /** The latest window the player was in that has ended and whose prize (if any) is not taken. */
 async function lastResult(playerId: string, now: number) {
-  const snap = await entries().where('playerId', '==', playerId).limit(40).get();
+  const { result: snap } = await runIndexedQuery(
+    'tournament_player_recent',
+    () => entries().where('playerId', '==', playerId).orderBy('joinedAt', 'desc').limit(10).get(),
+    () => entries().where('playerId', '==', playerId).limit(40).get(),
+  );
   const ended = snap.docs
     .map((d) => entryOf(d.data())!)
     .map((e) => ({ e, w: windowOfId(e.window, schedule) }))
@@ -137,7 +143,8 @@ async function lastResult(playerId: string, now: number) {
   if (!last) return null;
   const rows = await standings(last.w, last.e.group, last.w.endsAt);
   const place = rows.find((r) => r.id === playerId)?.rank ?? 0;
-  const prize = last.e.points > 0 ? prizeFor(place) : null;
+  // A shadowbanned player's isolated bot-only group (negative id) wins nothing.
+  const prize = last.e.points > 0 && last.e.group >= 0 ? prizeFor(place) : null;
   const taken = prize ? (await prizes().doc(`${last.w.id}_${playerId}`).get()).exists : false;
   return { window: last.w.id, endedAt: last.w.endsAt, place, points: last.e.points, prize, taken, top: view(rows, playerId) };
 }
@@ -148,19 +155,21 @@ export const tournamentService = {
     const now = Date.now();
     const w = windowAt(now, schedule);
     const next = nextWindow(now, schedule);
+    const [curSnap, result] = await Promise.all([
+      w ? entries().doc(`${w.id}_${playerId}`).get() : Promise.resolve(null),
+      lastResult(playerId, now),
+    ]);
     let joined = false;
     let group: ReturnType<typeof view> | null = null;
     let points = 0;
-    if (w) {
-      const snap = await entries().doc(`${w.id}_${playerId}`).get();
-      const e = entryOf(snap.data());
+    if (w && curSnap) {
+      const e = entryOf(curSnap.data());
       if (e) {
         joined = true;
         points = e.points;
         group = view(await standings(w, e.group, now), playerId);
       }
     }
-    const result = await lastResult(playerId, now);
     return {
       now,
       open: !!w && now < w.endsAt - JOIN_CLOSES_MS,
@@ -183,10 +192,17 @@ export const tournamentService = {
     const w = windowAt(now, schedule);
     if (!w || now >= w.endsAt - JOIN_CLOSES_MS) throw new AppError(409, 'tournament_closed');
     const ref = entries().doc(`${w.id}_${playerId}`);
-    const profile = await profileOf(playerId, given);
+    const [profile, hidden] = await Promise.all([profileOf(playerId, given), leaderboardService.isHidden(playerId)]);
     const e = await db.runTransaction(async (tx) => {
       const have = await tx.get(ref);
       if (have.exists) return entryOf(have.data())!;
+      // Shadowbanned players are placed in an isolated bot-only group (negative group id)
+      // without touching windows/{w.id}.joined so real groups remain clean.
+      if (hidden) {
+        const entry: Entry = { window: w.id, playerId, group: shadowGroupOf(w.id, playerId), points: 0, lastAt: 0, joinedAt: now, ...profile };
+        tx.create(ref, entry);
+        return entry;
+      }
       const wref = windows().doc(w.id);
       const ws = await tx.get(wref);
       const place = ws.exists ? (ws.get('joined') as number) ?? 0 : 0;
@@ -239,7 +255,8 @@ export const tournamentService = {
     if (!w || now < w.endsAt) throw new AppError(409, 'nothing_to_claim');
     const snap = await entries().doc(`${w.id}_${playerId}`).get();
     const e = entryOf(snap.data());
-    if (!e || e.points <= 0) throw new AppError(409, 'nothing_to_claim');
+    // A shadowbanned player's isolated bot-only group (negative id) wins nothing.
+    if (!e || e.points <= 0 || e.group < 0) throw new AppError(409, 'nothing_to_claim');
     const rows = await standings(w, e.group, w.endsAt);
     const place = rows.find((r) => r.id === playerId)?.rank ?? 0;
     const prize = prizeFor(place);

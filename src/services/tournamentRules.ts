@@ -162,6 +162,11 @@ export function rank(rows: Standing[]): (Standing & { rank: number })[] {
   return [...rows].sort((a, b) => b.points - a.points || a.joinedAt - b.joinedAt).map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
+/** Deterministic negative group id isolating a shadowbanned player from all real groups (>= 0). */
+export function shadowGroupOf(windowId: string, playerId: string): number {
+  return -1 - (hash(`${windowId}|${playerId}|shadow`) % 1_000_000);
+}
+
 /** What a score may add: null when it is refused, else the points actually taken (capped). */
 export function allowedAdd(current: number, lastAt: number, add: number, now: number): number | null {
   if (!Number.isFinite(add) || add <= 0) return null;

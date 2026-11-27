@@ -9,6 +9,7 @@ import { dbLog } from '../services/logStore';
 import { playerService } from '../services/playerService';
 import { hashToken } from '../services/purchaseService';
 import { seedService } from '../services/seedService';
+import { teamService } from '../services/teamService';
 import { logBusinessEvent } from '../utils/logger';
 import { safeForLog } from '../utils/safeLog';
 
@@ -25,6 +26,7 @@ import { safeForLog } from '../utils/safeLog';
  * GET    /admin/players/by-name?name=Polat   players with that name: id, level, hidden or not
  * POST   /admin/players/:playerId/unhide       a hidden board row shown again (strikes cleared)
  * POST   /admin/backfill/names           the name search's lowercase name on older leaderboard rows
+ * POST   /admin/backfill/team-scores     every team's score recounted (hidden members 0), sample teams set open
  */
 const plain = (d: FirebaseFirestore.DocumentSnapshot) => ({ id: d.id, ...(safeForLog(d.data()) as object) });
 
@@ -66,6 +68,8 @@ export function createAdminRouter(): Router {
       const id = req.params.playerId;
       const ok = await leaderboardService.unhide(id);
       if (!ok) throw new AppError(404, 'not_on_board');
+      // Their level counts for their team again.
+      await teamService.onUnhidden(id).catch(() => undefined);
       logBusinessEvent('player_unhidden', { target: id });
       res.json({ success: true, playerId: id, hidden: false });
     }),
@@ -154,6 +158,7 @@ export function createAdminRouter(): Router {
   }));
   router.delete('/seed/teams', asyncRoute(async (_req, res) => res.json({ success: true, ...(await seedService.remove()) })));
   router.post('/backfill/names', asyncRoute(async (_req, res) => res.json({ success: true, ...(await seedService.backfillNames()) })));
+  router.post('/backfill/team-scores', asyncRoute(async (_req, res) => res.json({ success: true, ...(await teamService.recountScores()) })));
 
   return router;
 }

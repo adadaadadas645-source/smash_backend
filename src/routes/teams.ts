@@ -4,29 +4,36 @@ import { PlayerRequest, requirePlayer } from '../middleware/auth';
 import { asyncRoute } from '../middleware/errorHandler';
 import { limits } from '../middleware/rateLimits';
 import { dbLog } from '../services/logStore';
-import { createSchema, teamService } from '../services/teamService';
+import { createSchema, editSchema, teamService } from '../services/teamService';
 import { logBusinessEvent } from '../utils/logger';
 
 /**
- * GET  /teams/mine                 -> { team, members } | { team: null }
- * GET  /teams/recommended          -> { teams }
- * GET  /teams/top?country=TR       -> { teams }          (the team board: the world's, or a country's)
- * GET  /teams/search?q=            -> { teams }
- * GET  /teams/:id                  -> { team, members }
- * POST /teams                      { name, description, crest, type, minLevel, minCrowns } -> { id }
- * POST /teams/:id/join
- * POST /teams/leave
- * GET  /teams/chat                 -> { messages, askLifeInMs, livesWaiting }
- * POST /teams/chat                 { text } -> { text }   (as stored: masked)
- * POST /teams/life/ask
- * POST /teams/life/:messageId/help -> { coins }
- * POST /teams/life/take            -> { lives }
- * POST /teams/coins/ask
- * POST /teams/coins/:messageId/help -> { coins }  (the helper's; the asker's go to the inbox)
- * POST /teams/coins/take           -> { coins }
- * POST /teams/report               { messageId, reason }
+ * GET    /teams/mine                  -> { team, members } | { team: null }
+ * PATCH  /teams/mine                  { description?, crest?, type?, minLevel?, minCrowns? } -> { team }
+ * GET    /teams/recommended           -> { teams }
+ * GET    /teams/top?country=TR        -> { teams }          (the team board: the world's, or a country's)
+ * GET    /teams/search?q=             -> { teams }
+ * GET    /teams/chat                  -> { messages, askLifeInMs, askCoinsInMs, livesWaiting, coinsWaiting }
+ * POST   /teams/chat                  { text } -> { text }   (as stored: masked)
+ * POST   /teams                       { name, description, crest, type, minLevel, minCrowns } -> { id }
+ * POST   /teams/leave
+ * POST   /teams/kick                  { playerId }
+ * POST   /teams/role                  { playerId, role: leader | coleader | knight } -> { role }
+ * POST   /teams/requests/cancel       -> { cancelled }
+ * DELETE /teams/requests/mine         -> { cancelled }
+ * POST   /teams/requests/:playerId    { accept } -> { joined }
+ * POST   /teams/life/ask
+ * POST   /teams/life/:messageId/help  -> { coins }
+ * POST   /teams/life/take             -> { lives }
+ * POST   /teams/coins/ask
+ * POST   /teams/coins/:messageId/help -> { coins }  (the helper's; the asker's go to the inbox)
+ * POST   /teams/coins/take            -> { coins }
+ * POST   /teams/report                { messageId, reason }
+ * GET    /teams/:id                   -> { team, members }
+ * POST   /teams/:id/join              -> { requested }
  */
 const idParam = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/);
+const playerIdBody = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 
 export function createTeamRouter(): Router {
   const router = Router();
@@ -36,6 +43,9 @@ export function createTeamRouter(): Router {
     const m = await teamService.memberOf(req.playerId);
     if (!m) return res.json({ success: true, team: null });
     res.json({ success: true, ...(await teamService.info(m.teamId)), role: m.role });
+  }));
+  router.patch('/mine', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    res.json({ success: true, ...(await teamService.edit(req.playerId, editSchema.parse(req.body))) });
   }));
   router.get('/recommended', asyncRoute<PlayerRequest>(async (_req, res) => res.json({ success: true, teams: await teamService.recommended() })));
   router.get('/top', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, teams: await teamService.top(String(req.query.country ?? '').toUpperCase() || undefined) })));
@@ -51,6 +61,15 @@ export function createTeamRouter(): Router {
   router.post('/leave', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     await teamService.leave(req.playerId);
     res.json({ success: true });
+  }));
+  router.post('/kick', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    const body = z.object({ playerId: playerIdBody }).parse(req.body);
+    await teamService.kick(req.playerId, body.playerId);
+    res.json({ success: true });
+  }));
+  router.post('/role', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    const body = z.object({ playerId: playerIdBody, role: z.enum(['leader', 'coleader', 'knight']) }).parse(req.body);
+    res.json({ success: true, ...(await teamService.setRole(req.playerId, body.playerId, body.role)) });
   }));
   router.post('/chat', limits.chat, asyncRoute<PlayerRequest>(async (req, res) => {
     const body = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
@@ -78,11 +97,18 @@ export function createTeamRouter(): Router {
     dbLog.security('chat_report', { messageId: body.messageId, reason: body.reason });
     res.json({ success: true });
   }));
-  router.get('/:id', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await teamService.info(idParam.parse(req.params.id))) })));
+  // Keep specific /requests/* routes BEFORE /:id!
+  router.post('/requests/cancel', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    res.json({ success: true, ...(await teamService.cancelRequest(req.playerId)) });
+  }));
+  router.delete('/requests/mine', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    res.json({ success: true, ...(await teamService.cancelRequest(req.playerId)) });
+  }));
   router.post('/requests/:playerId', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     const body = z.object({ accept: z.boolean() }).parse(req.body);
     res.json({ success: true, ...(await teamService.answerRequest(req.playerId, idParam.parse(req.params.playerId), body.accept)) });
   }));
+  router.get('/:id', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await teamService.info(idParam.parse(req.params.id))) })));
   router.post('/:id/join', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     res.json({ success: true, ...(await teamService.join(req.playerId, idParam.parse(req.params.id))) });
   }));

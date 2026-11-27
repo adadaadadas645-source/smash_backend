@@ -7,7 +7,7 @@ import { leaderboardService } from '../services/leaderboardService';
 import { dbLog } from '../services/logStore';
 import { playerService } from '../services/playerService';
 import { profileSchema } from '../services/profile';
-import { socialService } from '../services/socialService';
+import { socialService, countryOf } from '../services/socialService';
 import { teamService } from '../services/teamService';
 import { logBusinessEvent, logger, logSecurityEvent } from '../utils/logger';
 
@@ -27,26 +27,38 @@ export function createLeaderboardRouter(): Router {
     asyncRoute<PlayerRequest>(async (req, res) => {
       const body = submitSchema.parse(req.body);
       let { name, avatar, frame } = body;
-      if (name === undefined || avatar === undefined || frame === undefined) {
+      let locale = body.locale;
+      if (name === undefined || avatar === undefined || frame === undefined || !locale) {
         const p = await playerService.get(req.playerId);
         name ??= p?.name ?? 'Player';
         avatar ??= (p?.avatar as typeof avatar) ?? 'leo';
         frame ??= (p?.frame as typeof frame) ?? 'gold';
+        locale ??= p?.locale ?? undefined;
       }
-      const r = await leaderboardService.submit(req.playerId, body.level, { name, avatar: avatar!, frame: frame! }, body.stats);
+      const country = countryOf(locale);
+      const r = await leaderboardService.submit(req.playerId, body.level, { name, avatar: avatar!, frame: frame! }, body.stats, country);
       if (r.clamped || (r.first && r.level >= 150)) {
         const data = { claimed: body.level, granted: r.level, previous: r.previous, first: r.first };
         logSecurityEvent('leaderboard_suspect', data);
         dbLog.security('leaderboard_suspect', data);
       }
+      if (r.hides) {
+        // Newly shadowbanned: zero out their score contribution from their team off-path.
+        void teamService.onHidden(req.playerId).catch((err) => logger.warn({ err }, 'team: hidden score not removed'));
+      }
+      if (r.first) {
+        // Joined a team before first level submit: attach their team name onto the new board row.
+        void teamService.syncBoardTeam(req.playerId).catch((err) => logger.warn({ err }, 'team: board tag not synced'));
+      }
       if (r.accepted) {
-        // The week's points (levels gained, not a first claim of old levels), the country, the team's score.
+        // The week's points (levels gained, not a first claim of old levels) and the team's score.
         const gained = r.previous === null ? 0 : r.level - r.previous;
-        // The country: the device's region the game sends ("en-TR"), else the player's saved locale.
         // A hidden row (suspect claims): its levels count for no one else's board, week or team.
-        void (body.locale ? Promise.resolve({ locale: body.locale }) : playerService.get(req.playerId))
-          .then((p) => socialService.onLevel(req.playerId, r.hidden ? 0 : gained, { name: name!, avatar: avatar!, frame: frame!, level: r.level, locale: p?.locale }))
-          .catch((err) => logger.warn({ err }, 'social: level not counted'));
+        if (!r.hidden && gained > 0) {
+          void socialService
+            .onLevel(req.playerId, gained, { name: name!, avatar: avatar!, frame: frame!, level: r.level })
+            .catch((err) => logger.warn({ err }, 'social: level not counted'));
+        }
         if (!r.hidden) void teamService.onLevel(req.playerId, r.level).catch((err) => logger.warn({ err }, 'team: level not counted'));
         logBusinessEvent('level_reached', { level: r.level, previous: r.previous, claimed: body.level });
         dbLog.event('level_reached', { level: r.level, previous: r.previous, claimed: body.level });

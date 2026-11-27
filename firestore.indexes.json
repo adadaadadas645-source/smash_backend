@@ -17,6 +17,40 @@
       ]
     },
     {
+      "collectionGroup": "kingdom_leaderboard",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "country", "order": "ASCENDING" },
+        { "fieldPath": "level", "order": "DESCENDING" },
+        { "fieldPath": "levelReachedAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_weekly",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "week", "order": "ASCENDING" },
+        { "fieldPath": "points", "order": "DESCENDING" },
+        { "fieldPath": "level", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_teams",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "country", "order": "ASCENDING" },
+        { "fieldPath": "score", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kingdom_tournament_entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "playerId", "order": "ASCENDING" },
+        { "fieldPath": "joinedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "kingdom_logs",
       "queryScope": "COLLECTION",
       "fields": [

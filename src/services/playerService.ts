@@ -146,20 +146,40 @@ export const playerService = {
 
 /** What the game may know about its own player. */
 /**
- * The player's row on the boards (kingdom_leaderboard) takes a new name, avatar or frame at once:
- * the name search (/dm/search) and the boards read it, and it would otherwise wait for the next
- * level won. Only a row that is there (a player who never reached the board has none).
+ * The player's face (name, avatar, frame) is synced in parallel across every public view:
+ * - kingdom_leaderboard (world/country boards and /dm/search)
+ * - kingdom_team_members (team member roster)
+ * - kingdom_weekly/{thisWeek}_{playerId} (this week's race)
+ * Only existing docs are updated (.update().catch), so no phantom rows are ever created.
  */
+function currentWeekId(ms: number = Date.now()): string {
+  const d = new Date(ms);
+  const day = (d.getUTCDay() + 6) % 7;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day)).toISOString().slice(0, 10);
+}
+
 export async function syncBoardFace(playerId: string, face: { name?: unknown; avatar?: unknown; frame?: unknown }): Promise<void> {
-  const row: Record<string, unknown> = {};
+  const boardRow: Record<string, unknown> = {};
+  const socialRow: Record<string, unknown> = {};
   if (typeof face.name === 'string') {
-    row.name = face.name;
-    row.nameLower = face.name.toLocaleLowerCase('tr');
+    boardRow.name = face.name;
+    boardRow.nameLower = face.name.toLocaleLowerCase('tr');
+    socialRow.name = face.name;
   }
-  if (typeof face.avatar === 'string') row.avatar = face.avatar;
-  if (typeof face.frame === 'string') row.frame = face.frame;
-  if (Object.keys(row).length === 0) return;
-  await col.leaderboard().doc(playerId).update(row).catch(() => undefined);
+  if (typeof face.avatar === 'string') {
+    boardRow.avatar = face.avatar;
+    socialRow.avatar = face.avatar;
+  }
+  if (typeof face.frame === 'string') {
+    boardRow.frame = face.frame;
+    socialRow.frame = face.frame;
+  }
+  if (Object.keys(boardRow).length === 0) return;
+  await Promise.all([
+    col.leaderboard().doc(playerId).update(boardRow).catch(() => undefined),
+    col.teamMembers().doc(playerId).update(socialRow).catch(() => undefined),
+    col.weekly().doc(`${currentWeekId()}_${playerId}`).update(socialRow).catch(() => undefined),
+  ]);
 }
 
 export function publicPlayer(doc: PlayerDoc) {
