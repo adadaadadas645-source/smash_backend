@@ -207,6 +207,28 @@ async function cancelAllRequests(teamId: string): Promise<number> {
   return reqs.size;
 }
 
+/**
+ * The player's waiting join request to another team (pendingTeam), read inside the transaction
+ * (before its writes): null when there is none, or it is for `exceptTeamId`.
+ */
+async function otherRequestOf(tx: FirebaseFirestore.Transaction, playerSnap: FirebaseFirestore.DocumentSnapshot, exceptTeamId: string | null) {
+  const pending = playerSnap.get('pendingTeam') as { teamId?: string } | undefined;
+  if (!pending?.teamId || pending.teamId === exceptTeamId) return null;
+  const req = await tx.get(col.teams().doc(pending.teamId).collection('requests').doc(playerSnap.id));
+  return req.exists ? req : null;
+}
+
+/**
+ * A waiting request closed because its asker is in a team now: the request goes, and its card in
+ * that team's chat says so at once ("Joined another team" for `taken`): no Accept / Decline left on it.
+ */
+function closeRequest(tx: FirebaseFirestore.Transaction, req: FirebaseFirestore.DocumentSnapshot, status: 'taken' | 'accepted') {
+  const msgId = req.get('messageId') as string | undefined;
+  tx.delete(req.ref);
+  const teamRef = req.ref.parent.parent;
+  if (msgId && teamRef) tx.set(teamRef.collection('messages').doc(msgId), { status }, { merge: true });
+}
+
 /** A brand-new account may not write yet (a spam bot's first minutes); a player's chat is off; the same words twice in a row are refused. */
 export const NEW_ACCOUNT_CHAT_MS = 10 * 60_000;
 export const SAME_MESSAGE_MS = 60_000;
@@ -313,10 +335,13 @@ export const teamService = {
       if (dailyQuotaExceeded(playerSnap.get('teamCreateDay'), playerSnap.get('teamCreateN'), today, MAX_TEAM_CREATES_PER_DAY)) {
         throw new AppError(429, 'team_create_limit');
       }
+      // A request waiting at another team: closed, as the player has their own team now.
+      const other = await otherRequestOf(tx, playerSnap, null);
       const hidden = boardSnap.exists && !!boardSnap.get('hidden');
       const contrib = hidden ? 0 : me.level;
       const country = (boardSnap.exists ? (boardSnap.get('country') as string | undefined) : undefined) ?? null;
       const sameDay = playerSnap.get('teamCreateDay') === today;
+      if (other) closeRequest(tx, other, 'taken');
       tx.set(playerRef, { teamCreateDay: today, teamCreateN: sameDay ? ((playerSnap.get('teamCreateN') as number) ?? 0) + 1 : 1, pendingTeam: FieldValue.delete() }, { merge: true });
       tx.create(teamRef, {
         name,
@@ -379,8 +404,13 @@ export const teamService = {
         tx.create(reqRef, { messageId: msgRef.id, level: me.level, name: me.name, avatar: me.avatar, frame: me.frame, at: now });
         return true;
       }
+      // In at once (an open team): a request waiting at another team is closed ("Joined another
+      // team" on its card), and one left here from when this team was "by request" says accepted.
+      const other = await otherRequestOf(tx, meDoc, teamId);
       const hidden = boardSnap.exists && !!boardSnap.get('hidden');
       const contrib = hidden ? 0 : me.level;
+      if (other) closeRequest(tx, other, 'taken');
+      if (waiting.exists) closeRequest(tx, waiting, 'accepted');
       tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(contrib), activeAt: now });
       boardTeam(tx, boardSnap, t.name);
       tx.create(col.teamMembers().doc(playerId), { teamId, role: 'knight', level: me.level, countedScore: contrib, helps: 0, name: me.name, avatar: me.avatar, frame: me.frame, joinedAt: now } satisfies MemberDoc);
@@ -425,8 +455,16 @@ export const teamService = {
     const now = Timestamp.now();
     const joined = await col.teams().firestore.runTransaction(async (tx) => {
       const boardRef = col.leaderboard().doc(askerId);
-      const [req, team, theirs, boardSnap] = await Promise.all([tx.get(reqRef), tx.get(teamRef), tx.get(col.teamMembers().doc(askerId)), tx.get(boardRef)]);
+      const [req, team, theirs, boardSnap, askerSnap] = await Promise.all([
+        tx.get(reqRef),
+        tx.get(teamRef),
+        tx.get(col.teamMembers().doc(askerId)),
+        tx.get(boardRef),
+        tx.get(col.players().doc(askerId)),
+      ]);
       if (!req.exists) throw new AppError(404, 'request_not_found');
+      // Accepted: a request the asker left at another team is closed as they come in here.
+      const other = accept ? await otherRequestOf(tx, askerSnap, by.teamId) : null;
       const msgRef = teamRef.collection('messages').doc(req.get('messageId') as string);
       tx.delete(reqRef);
       const answer = (accepted: boolean) =>
@@ -447,6 +485,7 @@ export const teamService = {
       const hidden = boardSnap.exists && !!boardSnap.get('hidden');
       const contrib = hidden ? 0 : asker!.level;
       tx.set(msgRef, { status: 'accepted' }, { merge: true });
+      if (other) closeRequest(tx, other, 'taken');
       answer(true);
       tx.update(teamRef, { members: FieldValue.increment(1), score: FieldValue.increment(contrib), activeAt: now });
       boardTeam(tx, boardSnap, t.name);
