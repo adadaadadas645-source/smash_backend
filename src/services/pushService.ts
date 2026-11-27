@@ -2,6 +2,7 @@ import { createSign } from 'crypto';
 import { connect, ClientHttp2Session } from 'http2';
 import { config } from '../config';
 import { col, FieldValue } from '../firebase';
+import { getMessaging } from 'firebase-admin/messaging';
 import { logger } from '../utils/logger';
 
 /**
@@ -72,16 +73,28 @@ export const pushService = {
     return !!config.apns;
   },
 
-  async saveToken(playerId: string, token: string, env: 'sandbox' | 'production') {
+  async saveToken(playerId: string, token: string, env: 'sandbox' | 'production' | 'fcm') {
     await col.players().doc(playerId).set({ push: { token, env } }, { merge: true });
   },
 
   /** A short alert to one player (nothing when they have no token or chat is off for them). */
   async toPlayer(playerId: string, title: string, body: string, data: Record<string, string> = {}) {
-    if (!config.apns) return;
     const p = await col.players().doc(playerId).get();
     const push = p.get('push') as { token?: string; env?: string } | undefined;
     if (!push?.token) return;
+    if (push.env !== 'fcm' && !config.apns) return;
+    // Android: Firebase Cloud Messaging (the backend's own Firebase project; no key of its own).
+    if (push.env === 'fcm') {
+      try {
+        await getMessaging().send({ token: push.token, notification: { title, body }, data, android: { priority: 'high', notification: { channelId: 'ks_reminders', sound: 'default' } } });
+      } catch (err) {
+        const code = (err as { code?: string }).code ?? '';
+        logger.warn({ code }, 'push: fcm not sent');
+        if (code.includes('registration-token-not-registered') || code.includes('invalid-registration-token') || code.includes('invalid-argument'))
+          await col.players().doc(playerId).update({ push: FieldValue.delete() }).catch(() => undefined);
+      }
+      return;
+    }
     const status = await send(push.token, push.env ?? 'production', { aps: { alert: { title, body }, sound: 'default' }, ...data });
     if (status === 410 || status === 400) await col.players().doc(playerId).update({ push: FieldValue.delete() }).catch(() => undefined);
   },

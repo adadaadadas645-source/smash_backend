@@ -31,12 +31,12 @@ export function createPlayerRouter(): Router {
     }),
   );
 
-  /** The phone's push token (iPhone, APNs): { token, env: sandbox | production }. */
+  /** The phone's push token: iPhone (APNs, env sandbox | production) or Android (FCM, env fcm). */
   router.post(
     '/me/push',
     asyncRoute<PlayerRequest>(async (req, res) => {
-      const body = z.object({ token: z.string().regex(/^[0-9a-fA-F]{32,200}$/), env: z.enum(['sandbox', 'production']) }).parse(req.body);
-      await pushService.saveToken(req.playerId, body.token.toLowerCase(), body.env);
+      const body = z.object({ token: z.string().min(32).max(4096).regex(/^[A-Za-z0-9:_\-]+$/), env: z.enum(['sandbox', 'production', 'fcm']) }).parse(req.body);
+      await pushService.saveToken(req.playerId, body.env === 'fcm' ? body.token : body.token.toLowerCase(), body.env);
       res.json({ success: true });
     }),
   );
