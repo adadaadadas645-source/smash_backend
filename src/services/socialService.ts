@@ -1,4 +1,5 @@
 import { Stats } from './profile';
+import { safetyService } from './safetyService';
 import { col, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { TtlCache } from '../utils/ttlCache';
@@ -263,6 +264,8 @@ export const socialService = {
     }
     if (!other) throw new AppError(404, 'player_not_found');
     if (other === playerId) throw new AppError(400, 'own_id');
+    // They blocked this player: it looks sent, and nothing reaches them.
+    if (await safetyService.blocks(other, playerId)) return { status: 'outgoing' };
     const mineRef = col.friends().doc(`${playerId}__${other}`);
     const theirsRef = col.friends().doc(`${other}__${playerId}`);
     const count = (await col.friends().where('owner', '==', playerId).count().get()).data().count;

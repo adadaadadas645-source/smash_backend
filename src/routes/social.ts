@@ -4,6 +4,7 @@ import { PlayerRequest, requirePlayer } from '../middleware/auth';
 import { asyncRoute } from '../middleware/errorHandler';
 import { limits } from '../middleware/rateLimits';
 import { socialService } from '../services/socialService';
+import { safetyService } from '../services/safetyService';
 
 /**
  * GET  /social/weekly               -> { week, endsInMs, prizes, top, me, total }
@@ -15,6 +16,9 @@ import { socialService } from '../services/socialService';
  * POST /social/friends/request      { code } -> { status }
  * POST /social/friends/answer       { playerId, accept }
  * POST /social/friends/remove       { playerId }
+ * GET  /social/blocks                -> { players: [id] }
+ * POST /social/block                 { playerId, block }
+ * POST /social/chat                  { off }   (team chat off: others' words hidden, writing refused)
  */
 const playerId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 
@@ -28,6 +32,15 @@ export function createSocialRouter(): Router {
   router.get('/country/:cc', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.country(req.playerId, String(req.params.cc))) })));
   router.get('/friends', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, ...(await socialService.friends(req.playerId)) })));
   router.get('/friends/suggested', limits.social, asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, players: await socialService.suggested(req.playerId) })));
+  router.get('/blocks', asyncRoute<PlayerRequest>(async (req, res) => res.json({ success: true, players: await safetyService.blocked(req.playerId) })));
+  router.post('/block', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    const body = z.object({ playerId, block: z.boolean() }).parse(req.body);
+    res.json({ success: true, ...(await safetyService.setBlock(req.playerId, body.playerId, body.block)) });
+  }));
+  router.post('/chat', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
+    const body = z.object({ off: z.boolean() }).parse(req.body);
+    res.json({ success: true, ...(await safetyService.setChatOff(req.playerId, body.off)) });
+  }));
   router.post('/friends/request', limits.social, asyncRoute<PlayerRequest>(async (req, res) => {
     // By their ID (code), or by their player id (a player found by name).
     const body = z.object({ code: z.string().max(20).optional(), playerId: playerId.optional() }).refine((b) => !!b.code || !!b.playerId).parse(req.body);

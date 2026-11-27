@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import { cleanMessage, isRude } from './chatFilter';
 import { Stats } from './profile';
 import { normalizeCode, referralService } from './referralService';
+import { safetyService } from './safetyService';
 
 /**
  * Direct messages between two players (found by their ID, the invite code): words, and asking
@@ -14,6 +15,12 @@ import { normalizeCode, referralService } from './referralService';
  */
 const prefix = config.collections.players.replace(/players$/, '');
 const threads = () => db.collection(`${prefix}dm_threads`);
+
+/** One-to-one messages are off for now (only team chat): writing, asking and sending are refused. */
+export const DM_ENABLED = false;
+const dmOff = () => {
+  if (!DM_ENABLED) throw new AppError(403, 'dm_off');
+};
 
 export const DM_ASK_MS = 4 * 60 * 60_000;
 export const DM_COIN_GIFT = 20;
@@ -92,6 +99,7 @@ export const directMessageService = {
   },
 
   async say(me: string, other: string, raw: string) {
+    dmOff();
     if (other === me) throw new AppError(400, 'own_id');
     const text = cleanMessage(raw);
     if (!text) throw new AppError(400, 'empty_message');
@@ -110,6 +118,7 @@ export const directMessageService = {
 
   /** Asks the other for a life or coins (once every DM_ASK_MS each). */
   async ask(me: string, other: string, kind: 'life' | 'coins') {
+    dmOff();
     if (other === me) throw new AppError(400, 'own_id');
     await exists(other);
     await friendsOnly(me, other);
@@ -128,6 +137,7 @@ export const directMessageService = {
 
   /** Sends what the other asked for in `messageId` (only to their ask, once). */
   async help(me: string, other: string, messageId: string) {
+    dmOff();
     const ref = threads().doc(pairOf(me, other));
     const msgRef = ref.collection('messages').doc(messageId);
     return db.runTransaction(async (tx) => {
@@ -175,12 +185,13 @@ export const directMessageService = {
             .map((d) => ({ playerId: d.id, name: (d.get('name') as string) ?? 'A player', avatar: (d.get('avatar') as string) ?? 'leo', frame: (d.get('frame') as string) ?? 'gold', at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
             .filter((r) => r.at > after)
         : [];
-    const words = [...asA.docs, ...asB.docs]
+    const blocked = new Set(await safetyService.blocked(me));
+    const words = (DM_ENABLED ? [...asA.docs, ...asB.docs] : [])
       .filter((t) => t.get('lastFrom') && t.get('lastFrom') !== me && ((t.get('lastAt') as number) ?? 0) > after)
       .map((t) => ({ playerId: t.get('lastFrom') as string, text: (t.get('lastText') as string) ?? '', at: t.get('lastAt') as number }));
     const requests = reqs.docs
       .map((d) => ({ playerId: d.get('other') as string, at: (d.get('at') as FirebaseFirestore.Timestamp)?.toMillis?.() ?? 0 }))
-      .filter((r) => r.at > after);
+      .filter((r) => r.at > after && !blocked.has(r.playerId));
     // Their names (the board's row, else the player's own).
     const ids = [...new Set([...words.map((w) => w.playerId), ...requests.map((r) => r.playerId)])];
     const faces = new Map<string, { name: string; avatar: string; frame: string }>();

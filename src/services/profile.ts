@@ -1,3 +1,4 @@
+import { nameIsRude } from './chatFilter';
 import { z } from 'zod';
 
 /** The same lists as HomeUi.AvatarIds / FrameIds in the game. */
@@ -19,12 +20,18 @@ export function cleanName(raw: unknown): string {
   return s;
 }
 
+/** A player's name as others will see it: a rude one (or one with personal information) becomes PlayerNNNN. */
+export function safePlayerName(raw: unknown): string {
+  const s = cleanName(raw);
+  return nameIsRude(s) ? `Player${1000 + Math.floor(Math.random() * 9000)}` : s;
+}
+
 const count = z.number().int().min(0).max(10_000_000);
 export const statsSchema = z.object({ firstTry: count, bestStreak: count, eventWins: count });
 export type Stats = z.infer<typeof statsSchema>;
 
 export const profileSchema = z.object({
-  name: z.string().max(64).optional().transform((v) => (v === undefined ? undefined : cleanName(v))),
+  name: z.string().max(64).optional().transform((v) => (v === undefined ? undefined : safePlayerName(v))),
   avatar: z.enum(AVATARS).optional().catch(undefined),
   frame: z.enum(FRAMES).optional().catch(undefined),
   locale: z.string().max(10).regex(/^[A-Za-z-]+$/).optional().catch(undefined),

@@ -1,3 +1,4 @@
+import { nameIsRude } from './chatFilter';
 import { randomBytes, scrypt as scryptCb, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 import { z } from 'zod';
@@ -6,6 +7,8 @@ import { AppError } from '../middleware/errorHandler';
 import { currentContext } from '../utils/context';
 import { logBusinessEvent, logSecurityEvent, logger } from '../utils/logger';
 import { leaderboardService } from './leaderboardService';
+import { safetyService } from './safetyService';
+import { teamService } from './teamService';
 import { dbLog } from './logStore';
 import { PlayerDoc, playerService, syncBoardFace } from './playerService';
 import { hashDeviceSecret } from './tokenService';
@@ -64,6 +67,8 @@ export const accountService = {
   async create(playerId: string, rawUsername: string, password: string): Promise<PlayerDoc> {
     const username = usernameSchema.parse(rawUsername);
     passwordSchema.parse(password);
+    // The username is the name everyone sees: no rude word, no personal information.
+    if (nameIsRude(username)) throw new AppError(400, 'name_rude', 'This name is not allowed');
     const key = usernameKey(username);
     const passwordHash = await hashPassword(password);
     const playerRef = col.players().doc(playerId);
@@ -151,12 +156,18 @@ export const accountService = {
 
   /**
    * Deletes the player for good: the player, its username, cloud save, leaderboard row, invite
-   * code and referral. The purchase records stay (see above). Its tokens stop working at once
+   * code and referral, and all its social side (team, friends, messages, blocks, reports). The purchase records stay (see above). Its tokens stop working at once
    * (player_not_found).
    */
   async remove(playerId: string, how: 'game' | 'web'): Promise<void> {
     const doc = await playerService.get(playerId);
     if (!doc) throw new AppError(404, 'player_not_found');
+    // Everything social first: out of the team (its count and lead stay right), then friends,
+    // messages, blocks and reports.
+    const member = await col.teamMembers().doc(playerId).get();
+    const teamId = member.exists ? (member.get('teamId') as string) : null;
+    if (member.exists) await teamService.leave(playerId).catch((err) => logger.warn({ err, playerId }, 'delete: team not left'));
+    await safetyService.forget(playerId, teamId).catch((err) => logger.warn({ err, playerId }, 'delete: social data not all removed'));
     const batch = col.players().firestore.batch();
     if (doc.usernameKey) batch.delete(col.usernames().doc(doc.usernameKey));
     const inviteCode = (doc as PlayerDoc & { inviteCode?: string }).inviteCode;

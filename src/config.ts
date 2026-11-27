@@ -109,6 +109,8 @@ export const config = {
     friends: `${env.COLLECTION_PREFIX}friends`,
     /** Chat messages players reported. */
     reports: `${env.COLLECTION_PREFIX}reports`,
+    /** Players a player blocked: {owner}__{other} { owner, other, at }. */
+    blocks: `${env.COLLECTION_PREFIX}blocks`,
   },
 
   jwt: {

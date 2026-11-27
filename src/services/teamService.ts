@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { col, FieldValue, Timestamp } from '../firebase';
 import { AppError } from '../middleware/errorHandler';
 import { TtlCache } from '../utils/ttlCache';
-import { cleanMessage } from './chatFilter';
+import { cleanMessage, hidePersonal, isRude, nameIsRude } from './chatFilter';
 import { cleanName, Stats } from './profile';
 import { playerService } from './playerService';
+import { safetyService } from './safetyService';
 
 /**
  * Teams: a name, a crest, a short description, who may join (open, or by request: the leader
@@ -133,6 +134,23 @@ async function profileOf(playerId: string) {
   return { name: p.name, avatar: p.avatar, frame: p.frame, level: p.level ?? 1 };
 }
 
+/** A brand-new account may not write yet (a spam bot's first minutes); a player's chat is off; the same words twice in a row are refused. */
+export const NEW_ACCOUNT_CHAT_MS = 10 * 60_000;
+export const SAME_MESSAGE_MS = 60_000;
+
+async function chatGuard(playerId: string, text: string) {
+  const ref = col.players().doc(playerId);
+  const p = await ref.get();
+  const created = (p.get('createdAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis?.() ?? 0;
+  if (created && Date.now() - created < NEW_ACCOUNT_CHAT_MS) throw new AppError(403, 'too_new_to_chat');
+  if (p.get('chatOff')) throw new AppError(403, 'chat_off');
+  const last = (p.get('lastChat') as string | undefined) ?? '';
+  const lastAt = (p.get('lastChatAt') as number | undefined) ?? 0;
+  const same = last.toLocaleLowerCase('tr') === text.toLocaleLowerCase('tr');
+  if (same && Date.now() - lastAt < SAME_MESSAGE_MS) throw new AppError(429, 'duplicate_message');
+  await ref.update({ lastChat: text.slice(0, 200), lastChatAt: Date.now() });
+}
+
 export const teamService = {
   /** The player's membership, or null. */
   async memberOf(playerId: string): Promise<MemberDoc | null> {
@@ -195,6 +213,9 @@ export const teamService = {
   async create(playerId: string, input: z.infer<typeof createSchema>) {
     const me = await profileOf(playerId);
     const name = cleanName(input.name);
+    // A team's name and description are seen by everyone: no rude word, no personal information.
+    if (nameIsRude(name)) throw new AppError(400, 'team_name_rude');
+    if ((input.description ?? '').split(/\s+/).some((w) => isRude(w)) || hidePersonal(input.description ?? '') !== (input.description ?? '')) throw new AppError(400, 'team_description_rude');
     const nameLower = name.toLocaleLowerCase('tr');
     const taken = await col.teams().where('nameLower', '==', nameLower).limit(1).get();
     if (!taken.empty) throw new AppError(409, 'team_name_taken');
@@ -335,8 +356,13 @@ export const teamService = {
     if (!m) throw new AppError(404, 'not_in_team');
     const snap = await col.teams().doc(m.teamId).collection('messages').orderBy('createdAt', 'desc').limit(MESSAGES_KEPT).get();
     // A join request's card is the leader's alone (they answer it); the others see the "joined" line after.
+    const [blocked, meDoc] = await Promise.all([safetyService.blocked(playerId), col.players().doc(playerId).get()]);
+    const chatOff = !!meDoc.get('chatOff');
     const rows: MessageOut[] = snap.docs
       .filter((d) => d.get('kind') !== 'joinRequest' || m.role === 'leader')
+      // A blocked player's words never show (on any device); with chat off, no one else's words do.
+      .filter((d) => d.get('playerId') === playerId || !blocked.includes(d.get('playerId')))
+      .filter((d) => !chatOff || d.get('kind') !== 'text' || d.get('playerId') === playerId)
       .map((d) => {
         const x = d.data();
         const helpers = (x.helpers as string[]) ?? [];
@@ -363,6 +389,7 @@ export const teamService = {
     return {
       teamId: m.teamId,
       role: m.role,
+      chatOff,
       messages: rows,
       askLifeInMs: Math.max(0, askAt + ASK_LIFE_COOLDOWN_MS - Date.now()),
       askCoinsInMs: Math.max(0, coinsAt + ASK_COINS_COOLDOWN_MS - Date.now()),
@@ -379,6 +406,7 @@ export const teamService = {
     const p = await profileOf(playerId);
     const now = Timestamp.now();
     const teamRef = col.teams().doc(m.teamId);
+    await chatGuard(playerId, text);
     await teamRef.collection('messages').add({ kind: 'text', playerId, name: p.name, avatar: p.avatar, frame: p.frame, text, helpers: [], createdAt: now });
     void teamRef.update({ activeAt: now }).catch(() => undefined);
     return { text };

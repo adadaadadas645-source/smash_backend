@@ -55,6 +55,7 @@ export const col = {
   weeklyPrizes: () => db.collection(config.collections.weeklyPrizes),
   friends: () => db.collection(config.collections.friends),
   reports: () => db.collection(config.collections.reports),
+  blocks: () => db.collection(config.collections.blocks),
 };
 
 /** A cheap read that proves the credentials and the database work (used by /health/deep). */
