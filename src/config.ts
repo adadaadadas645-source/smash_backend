@@ -37,6 +37,12 @@ const schema = z.object({
   /** Long random value for the /admin endpoints (x-admin-key header). Empty: admin endpoints are off. */
   ADMIN_API_KEY: z.string().optional(),
 
+  /** Apple push (APNs): the .p8 key's text (newlines may be written \\n), its Key ID, the team. Empty: no pushes. */
+  APNS_KEY: z.string().optional(),
+  APNS_KEY_ID: z.string().optional(),
+  APNS_TEAM_ID: z.string().default('WYH4TRKC63'),
+  APNS_TOPIC: z.string().default('com.puzzle.royalsmash'),
+
   ANDROID_PACKAGE_NAME: z.string().default('com.puzzle.blockescape'),
   /** Service account allowed to call the Google Play Developer API. Falls back to the Firebase one. */
   GOOGLE_PLAY_SERVICE_ACCOUNT_KEY: z.string().optional(),
@@ -121,6 +127,7 @@ export const config = {
   },
   deviceSecretPepper: env.DEVICE_SECRET_PEPPER,
   adminApiKey: env.ADMIN_API_KEY || null,
+  apns: env.APNS_KEY && env.APNS_KEY_ID ? { key: env.APNS_KEY.replace(/\\n/g, '\n'), keyId: env.APNS_KEY_ID, teamId: env.APNS_TEAM_ID, topic: env.APNS_TOPIC } : null,
 
   play: {
     packageName: env.ANDROID_PACKAGE_NAME,

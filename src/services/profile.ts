@@ -23,7 +23,11 @@ export function cleanName(raw: unknown): string {
 /** A player's name as others will see it: a rude one (or one with personal information) becomes PlayerNNNN. */
 export function safePlayerName(raw: unknown): string {
   const s = cleanName(raw);
-  return nameIsRude(s) ? `Player${1000 + Math.floor(Math.random() * 9000)}` : s;
+  if (!nameIsRude(s)) return s;
+  // The same PlayerNNNN for the same name each time (a level sent again keeps it, not a new one).
+  let h = 0;
+  for (const c of s) h = (h * 31 + c.codePointAt(0)!) >>> 0;
+  return `Player${1000 + (h % 9000)}`;
 }
 
 const count = z.number().int().min(0).max(10_000_000);

@@ -63,7 +63,9 @@ export function nameIsRude(raw: string): boolean {
   if (hidePersonal(s) !== s) return true;
   // Its words: by spaces, dots, dashes, underscores and capital letters ("SikAdam" -> "Sik", "Adam").
   const words = s.replace(/([\p{Ll}\d])(\p{Lu})/gu, '$1 $2').split(/[\s._\-]+/).filter(Boolean);
-  if (words.some((w) => isRude(w))) return true;
+  // A name: the short roots only as the whole word ("Mal", "Got"), the long ones at its start, so
+  // real names ("Malek", "Picard", "Gotham", "Dickson") are not caught.
+  if (words.some((w) => nameWordRude(w))) return true;
   if (words.some((w) => /^(insta(gram)?|ig|discord|snap(chat)?|whats?app|telegram|tiktok|facebook|fb|twitter|kik|wechat)$/i.test(w))) return true;
   // Glued together ("SikAdam", "fuckyou"): the whole name folded, looked at from each letter.
   const folded = s
@@ -72,6 +74,17 @@ export function nameIsRude(raw: string): boolean {
     .replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/\$/g, 's').replace(/@/g, 'a')
     .replace(/[^a-z]/g, '');
   return LONG_ROOTS.some((r) => folded.includes(r));
+}
+
+function nameWordRude(word: string): boolean {
+  const f = word
+    .toLocaleLowerCase('tr')
+    .replace(/ı/g, 'i').replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ş/g, 's').replace(/ö/g, 'o').replace(/ç/g, 'c')
+    .replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/\$/g, 's').replace(/@/g, 'a')
+    .replace(/[^a-z]/g, '');
+  if (f.length < 2) return false;
+  if (ROOTS.includes(f)) return true;
+  return LONG_ROOTS.some((r) => f.startsWith(r));
 }
 
 /** Roots long enough to look for inside a word (short ones like "mal" would catch "Kemal"). */

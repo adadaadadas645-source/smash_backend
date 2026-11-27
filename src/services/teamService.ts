@@ -6,6 +6,7 @@ import { cleanMessage, hidePersonal, isRude, nameIsRude } from './chatFilter';
 import { cleanName, Stats } from './profile';
 import { playerService } from './playerService';
 import { safetyService } from './safetyService';
+import { pushService } from './pushService';
 
 /**
  * Teams: a name, a crest, a short description, who may join (open, or by request: the leader
@@ -463,6 +464,7 @@ export const teamService = {
     const m = await this.memberOf(playerId);
     if (!m) throw new AppError(404, 'not_in_team');
     const msgRef = col.teams().doc(m.teamId).collection('messages').doc(messageId);
+    let sent: { asker: string; kind: string } | null = null;
     await col.teams().firestore.runTransaction(async (tx) => {
       const msg = await tx.get(msgRef);
       const kind = msg.exists ? (msg.get('kind') as string) : '';
@@ -476,7 +478,17 @@ export const teamService = {
       const gift = kind === 'coins' ? { coins: FieldValue.increment(COIN_GIFT) } : { lives: FieldValue.increment(1) };
       tx.set(col.lifeInbox().doc(asker), { ...gift, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
       tx.update(col.teamMembers().doc(playerId), { helps: FieldValue.increment(1) });
+      sent = { asker, kind };
     });
+    // The asker's phone: who sent them what (even while the game is closed).
+    if (sent) {
+      const s = sent as { asker: string; kind: string };
+      const helper = await profileOf(playerId).catch(() => null);
+      const who = helper?.name ?? 'A teammate';
+      void pushService
+        .toPlayer(s.asker, s.kind === 'coins' ? 'Coins received! 🪙' : 'A life for you! ❤️', s.kind === 'coins' ? `${who} sent you coins!` : `${who} sent you a life!`, { kind: 'team_help' })
+        .catch(() => undefined);
+    }
     return { coins: HELP_COINS };
   },
 

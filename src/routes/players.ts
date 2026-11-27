@@ -5,6 +5,7 @@ import { limits } from '../middleware/rateLimits';
 import { dbLog } from '../services/logStore';
 import { playerService, publicPlayer } from '../services/playerService';
 import { profileSchema } from '../services/profile';
+import { pushService } from '../services/pushService';
 import { z } from 'zod';
 import { accountService } from '../services/accountService';
 import { saveSchema, saveService } from '../services/saveService';
@@ -27,6 +28,16 @@ export function createPlayerRouter(): Router {
       const doc = await playerService.get(req.playerId);
       if (!doc) throw new AppError(404, 'player_not_found');
       res.json({ success: true, player: publicPlayer(doc) });
+    }),
+  );
+
+  /** The phone's push token (iPhone, APNs): { token, env: sandbox | production }. */
+  router.post(
+    '/me/push',
+    asyncRoute<PlayerRequest>(async (req, res) => {
+      const body = z.object({ token: z.string().regex(/^[0-9a-fA-F]{32,200}$/), env: z.enum(['sandbox', 'production']) }).parse(req.body);
+      await pushService.saveToken(req.playerId, body.token.toLowerCase(), body.env);
+      res.json({ success: true });
     }),
   );
 
