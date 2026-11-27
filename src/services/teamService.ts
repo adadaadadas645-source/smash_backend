@@ -237,7 +237,8 @@ async function chatGuard(playerId: string, text: string) {
   const ref = col.players().doc(playerId);
   const p = await ref.get();
   const created = (p.get('createdAt') as FirebaseFirestore.Timestamp | undefined)?.toMillis?.() ?? 0;
-  if (created && Date.now() - created < NEW_ACCOUNT_CHAT_MS) throw new AppError(403, 'too_new_to_chat');
+  // How long is left, for the game's message ("You can write in 7 minutes").
+  if (created && Date.now() - created < NEW_ACCOUNT_CHAT_MS) throw new AppError(403, 'too_new_to_chat', undefined, { inMs: NEW_ACCOUNT_CHAT_MS - (Date.now() - created) });
   if (p.get('chatOff')) throw new AppError(403, 'chat_off');
   const last = (p.get('lastChat') as string | undefined) ?? '';
   const lastAt = (p.get('lastChatAt') as number | undefined) ?? 0;
